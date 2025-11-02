@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Multi-Chain Wallet Monitor
  * Description: Track ETH, BSC, and SOL wallets, log transactions, and send Discord alerts from a front-end control panel.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Grok AI
  */
 
@@ -16,12 +16,15 @@ class MCWT_MultiChain_Wallet_Monitor {
     const OPTION_META = 'mcwt_wallet_meta';
     const OPTION_LOG = 'mcwt_tx_log';
     const CRON_HOOK = 'mcwt_poll_transactions';
+    const CRON_SCHEDULE = 'mcwt_custom_interval';
+    const DEFAULT_INTERVAL = 5; // minutes
 
     public function __construct() {
         register_activation_hook(__FILE__, [__CLASS__, 'activate']);
         register_deactivation_hook(__FILE__, [__CLASS__, 'deactivate']);
 
         add_filter('cron_schedules', [$this, 'register_cron_schedules']);
+        add_action('init', [$this, 'ensure_schedule']);
         add_action(self::CRON_HOOK, [$this, 'poll_transactions']);
 
         add_shortcode('wallet_tracker', [$this, 'render_control_panel']);
@@ -34,10 +37,6 @@ class MCWT_MultiChain_Wallet_Monitor {
     }
 
     public static function activate() {
-        if (!wp_next_scheduled(self::CRON_HOOK)) {
-            wp_schedule_event(time() + 60, 'mcwt_five_minutes', self::CRON_HOOK);
-        }
-
         add_option(self::OPTION_WALLETS, []);
         add_option(self::OPTION_KEYS, [
             'etherscan' => '',
@@ -45,9 +44,14 @@ class MCWT_MultiChain_Wallet_Monitor {
             'solscan' => '',
             'discord_webhook' => '',
             'discord_message' => 'New transaction for {label} on {chain}: {hash}',
+            'poll_interval' => self::DEFAULT_INTERVAL,
         ]);
         add_option(self::OPTION_META, []);
         add_option(self::OPTION_LOG, []);
+
+        if (!wp_next_scheduled(self::CRON_HOOK)) {
+            wp_schedule_event(time() + 60, self::CRON_SCHEDULE, self::CRON_HOOK);
+        }
     }
 
     public static function deactivate() {
@@ -55,13 +59,42 @@ class MCWT_MultiChain_Wallet_Monitor {
     }
 
     public function register_cron_schedules($schedules) {
-        if (!isset($schedules['mcwt_five_minutes'])) {
-            $schedules['mcwt_five_minutes'] = [
-                'interval' => 300,
-                'display' => __('Every Five Minutes', 'mcwt'),
-            ];
-        }
+        $interval = $this->get_poll_interval_minutes();
+        $schedules[self::CRON_SCHEDULE] = [
+            'interval' => max(60, $interval * MINUTE_IN_SECONDS),
+            'display' => sprintf(__('Every %d minutes', 'mcwt'), (int) $interval),
+        ];
         return $schedules;
+    }
+
+    public function ensure_schedule() {
+        $this->maybe_upgrade_options();
+        $event = function_exists('wp_get_scheduled_event') ? wp_get_scheduled_event(self::CRON_HOOK) : false;
+        if ($event && isset($event->schedule) && self::CRON_SCHEDULE !== $event->schedule) {
+            $this->reschedule_polling();
+            return;
+        }
+
+        if (!wp_next_scheduled(self::CRON_HOOK)) {
+            wp_schedule_event(time() + 60, self::CRON_SCHEDULE, self::CRON_HOOK);
+        }
+    }
+
+    private function maybe_upgrade_options() {
+        $keys = get_option(self::OPTION_KEYS);
+        if (!is_array($keys)) {
+            return;
+        }
+
+        $updated = false;
+        if (!isset($keys['poll_interval']) || (int) $keys['poll_interval'] < 1) {
+            $keys['poll_interval'] = self::DEFAULT_INTERVAL;
+            $updated = true;
+        }
+
+        if ($updated) {
+            update_option(self::OPTION_KEYS, $keys);
+        }
     }
 
     public function render_control_panel() {
@@ -206,6 +239,13 @@ class MCWT_MultiChain_Wallet_Monitor {
                             <th scope="row"><label for="mcwt_discord_webhook"><?php esc_html_e('Discord Webhook URL', 'mcwt'); ?></label></th>
                             <td><input type="url" id="mcwt_discord_webhook" name="mcwt_keys[discord_webhook]" value="<?php echo esc_attr($api_keys['discord_webhook']); ?>" class="regular-text" /></td>
                         </tr>
+                        <tr>
+                            <th scope="row"><label for="mcwt_poll_interval"><?php esc_html_e('Polling Interval (minutes)', 'mcwt'); ?></label></th>
+                            <td>
+                                <input type="number" id="mcwt_poll_interval" name="mcwt_keys[poll_interval]" value="<?php echo esc_attr($api_keys['poll_interval']); ?>" class="small-text" min="1" max="1440" />
+                                <p class="description"><?php esc_html_e('How often to check the explorers for new transactions.', 'mcwt'); ?></p>
+                            </td>
+                        </tr>
                     </table>
                     <p><button type="submit" class="button button-primary"><?php esc_html_e('Save Keys', 'mcwt'); ?></button></p>
                 </form>
@@ -339,7 +379,13 @@ class MCWT_MultiChain_Wallet_Monitor {
             $current[$key] = isset($keys[$key]) ? sanitize_text_field($keys[$key]) : '';
         }
         $current['discord_webhook'] = isset($keys['discord_webhook']) ? esc_url_raw($keys['discord_webhook']) : '';
+
+        $interval = isset($keys['poll_interval']) ? (int) $keys['poll_interval'] : self::DEFAULT_INTERVAL;
+        $interval = max(1, min(1440, $interval));
+        $current['poll_interval'] = $interval;
+
         update_option(self::OPTION_KEYS, $current);
+        $this->reschedule_polling($interval);
 
         $this->add_notice(__('Settings saved.', 'mcwt'));
         $this->redirect_back();
@@ -411,8 +457,29 @@ class MCWT_MultiChain_Wallet_Monitor {
             'solscan' => '',
             'discord_webhook' => '',
             'discord_message' => 'New transaction for {label} on {chain}: {hash}',
+            'poll_interval' => self::DEFAULT_INTERVAL,
         ];
         return wp_parse_args($keys, $defaults);
+    }
+
+    private function get_poll_interval_minutes() {
+        $keys = $this->get_api_keys();
+        $interval = isset($keys['poll_interval']) ? (int) $keys['poll_interval'] : self::DEFAULT_INTERVAL;
+        if ($interval < 1) {
+            $interval = self::DEFAULT_INTERVAL;
+        }
+        return min(1440, $interval);
+    }
+
+    private function reschedule_polling($minutes = null) {
+        wp_clear_scheduled_hook(self::CRON_HOOK);
+
+        $minutes = null === $minutes ? $this->get_poll_interval_minutes() : max(1, min(1440, (int) $minutes));
+        if ($minutes < 1) {
+            return;
+        }
+
+        wp_schedule_event(time() + 60, self::CRON_SCHEDULE, self::CRON_HOOK);
     }
 
     public function poll_transactions() {
