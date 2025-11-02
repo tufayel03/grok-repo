@@ -1,1015 +1,1108 @@
+
 <?php
 /**
  * Plugin Name: Multi-Chain Wallet Tracker
  * Plugin URI: https://example.com
- * Description: Track wallets/contracts on ETH, BSC, SOL for token transactions. Alerts via Discord webhook with token/amount details. Frontend shortcodes: [wallet_tracker] for control, [wallet_latest_tx] for latest transactions, [wallet_logs] for logs. Etherscan V2 + Solscan support.
- * Version: 2.0
+ * Description: Track Ethereum and Binance Smart Chain wallets with transaction logs and Discord alerts.
+ * Version: 3.0.0
  * Author: Your Name
  * License: GPL v2 or later
  */
 
-// Prevent direct access
 if (!defined('ABSPATH')) {
     exit;
 }
 
-// Define plugin constants
-define('WALLET_TRACKER_VERSION', '2.0');
-define('WALLET_TRACKER_PLUGIN_DIR', plugin_dir_path(__FILE__));
-define('WALLET_TRACKER_PLUGIN_URL', plugin_dir_url(__FILE__));
+define('WALLET_TRACKER_VERSION', '3.0.0');
 
-// Enqueue script for AJAX localization
-function wallet_tracker_enqueue_assets() {
-    wp_enqueue_script('jquery');
-    wp_localize_script('jquery', 'wallet_ajax', array(
-        'ajaxurl' => admin_url('admin-ajax.php'),
-        'nonce' => wp_create_nonce('wallet_tracker_nonce')
-    ));
-}
+register_activation_hook(__FILE__, 'wallet_tracker_activate');
+register_deactivation_hook(__FILE__, 'wallet_tracker_deactivate');
 
-// Data persistence functions
-function get_wallet_data() {
-    return get_option('wallet_tracker_data', [
+add_filter('cron_schedules', 'wallet_tracker_register_schedule');
+add_action('wallet_tracker_cron_event', 'wallet_tracker_check_transactions');
+
+add_action('admin_menu', 'wallet_tracker_admin_menu');
+add_shortcode('wallet_tracker', 'wallet_tracker_shortcode');
+add_shortcode('wallet_transaction_logs', 'wallet_tracker_logs_shortcode');
+
+add_action('wp_ajax_wallet_tracker_load', 'wallet_tracker_handle_load');
+add_action('wp_ajax_wallet_tracker_save', 'wallet_tracker_handle_save');
+
+function wallet_tracker_default_data()
+{
+    return [
+        'config' => [
+            'etherscanKey' => '',
+            'bscscanKey' => '',
+            'discordWebhook' => '',
+            'pollInterval' => 300,
+        ],
         'wallets' => [],
-        'config' => ['pollInterval' => 30],
         'logs' => [],
-        'latestTxs' => []
-    ]);
+        'lastRun' => 0,
+    ];
 }
 
-function save_wallet_data($data) {
+function wallet_tracker_get_data()
+{
+    $data = get_option('wallet_tracker_data');
+    if (!is_array($data)) {
+        $data = wallet_tracker_default_data();
+        add_option('wallet_tracker_data', $data);
+    } else {
+        $defaults = wallet_tracker_default_data();
+        $data = array_merge($defaults, $data);
+        $data['config'] = array_merge($defaults['config'], $data['config']);
+        if (!isset($data['wallets']) || !is_array($data['wallets'])) {
+            $data['wallets'] = [];
+        }
+        if (!isset($data['logs']) || !is_array($data['logs'])) {
+            $data['logs'] = [];
+        }
+        if (!isset($data['lastRun'])) {
+            $data['lastRun'] = 0;
+        }
+    }
+    return $data;
+}
+
+function wallet_tracker_save_data($data)
+{
     return update_option('wallet_tracker_data', $data);
 }
 
-// AJAX handlers
-add_action('wp_ajax_wallet_tracker_load', 'handle_wallet_tracker_load');
-add_action('wp_ajax_nopriv_wallet_tracker_load', 'handle_wallet_tracker_load');
-function handle_wallet_tracker_load() {
-    error_log('Wallet Tracker Load AJAX called');
-    if (is_user_logged_in() && !wp_verify_nonce($_POST['nonce'], 'wallet_tracker_nonce')) {
-        wp_send_json_error('Nonce verification failed');
+function wallet_tracker_sanitize_interval($value)
+{
+    $interval = (int)$value;
+    if ($interval < 60) {
+        $interval = 60;
     }
-    $data = get_wallet_data();
-    wp_send_json_success($data);
+    if ($interval > 3600) {
+        $interval = 3600;
+    }
+    return $interval;
 }
 
-add_action('wp_ajax_wallet_tracker_save', 'handle_wallet_tracker_save');
-add_action('wp_ajax_nopriv_wallet_tracker_save', 'handle_wallet_tracker_save');
-function handle_wallet_tracker_save() {
-    error_log('Wallet Tracker Save AJAX called');
-    if (is_user_logged_in() && !wp_verify_nonce($_POST['nonce'], 'wallet_tracker_nonce')) {
-        wp_send_json_error('Nonce verification failed');
+function wallet_tracker_register_schedule($schedules)
+{
+    $data = wallet_tracker_get_data();
+    $interval = wallet_tracker_sanitize_interval($data['config']['pollInterval']);
+    $schedules['wallet_tracker_interval'] = [
+        'interval' => $interval,
+        'display' => sprintf(__('Wallet Tracker (%d seconds)', 'wallet-tracker'), $interval),
+    ];
+    return $schedules;
+}
+
+function wallet_tracker_schedule_event($interval = null)
+{
+    if ($interval === null) {
+        $data = wallet_tracker_get_data();
+        $interval = wallet_tracker_sanitize_interval($data['config']['pollInterval']);
     }
-    if (!isset($_POST['data'])) {
-        wp_send_json_error('No data provided');
-    }
-    $input_data = json_decode(stripslashes($_POST['data']), true);
-    if (json_last_error() !== JSON_ERROR_NONE) {
-        wp_send_json_error('Invalid JSON: ' . json_last_error_msg());
-    }
-    $saved = save_wallet_data($input_data);
-    if ($saved) {
-        wp_send_json_success('Data saved');
-    } else {
-        wp_send_json_error('Failed to update option');
+    $interval = wallet_tracker_sanitize_interval($interval);
+
+    wp_clear_scheduled_hook('wallet_tracker_cron_event');
+
+    if ($interval > 0) {
+        wp_schedule_event(time() + $interval, 'wallet_tracker_interval', 'wallet_tracker_cron_event');
     }
 }
 
-// Admin menu (unchanged)
-add_action('admin_menu', 'wallet_tracker_admin_menu');
-function wallet_tracker_admin_menu() {
+function wallet_tracker_activate()
+{
+    $data = wallet_tracker_get_data();
+    wallet_tracker_save_data($data);
+    wallet_tracker_schedule_event($data['config']['pollInterval']);
+}
+
+function wallet_tracker_deactivate()
+{
+    wp_clear_scheduled_hook('wallet_tracker_cron_event');
+}
+
+function wallet_tracker_enqueue_dependencies()
+{
+    wp_enqueue_script('jquery');
+}
+
+function wallet_tracker_render_styles()
+{
+    ob_start();
+    ?>
+    <style>
+        .wallet-tracker-container {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #121212;
+            color: #f5f5f5;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+            max-width: 1200px;
+        }
+        .wallet-tracker-container h1,
+        .wallet-tracker-container h2 {
+            color: #61dafb;
+            margin-bottom: 12px;
+        }
+        .wallet-tracker-section {
+            margin-bottom: 32px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .wallet-tracker-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        .wallet-tracker-grid label {
+            display: flex;
+            flex-direction: column;
+            font-weight: 600;
+            color: #cfd8dc;
+        }
+        .wallet-tracker-grid input,
+        .wallet-tracker-grid select {
+            margin-top: 6px;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: rgba(18, 18, 18, 0.9);
+            color: #fff;
+        }
+        .wallet-tracker-grid input:focus,
+        .wallet-tracker-grid select:focus {
+            outline: none;
+            border-color: #61dafb;
+            box-shadow: 0 0 0 2px rgba(97, 218, 251, 0.3);
+        }
+        .wallet-tracker-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+        .wallet-tracker-button {
+            background: linear-gradient(135deg, #61dafb 0%, #33b5e5 100%);
+            border: none;
+            color: #0b1320;
+            padding: 10px 18px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        .wallet-tracker-button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 20px rgba(97, 218, 251, 0.25);
+        }
+        .wallet-tracker-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+        }
+        .wallet-tracker-danger {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ff4757 100%);
+            color: #fff;
+        }
+        .wallet-table-wrapper {
+            overflow-x: auto;
+        }
+        .wallet-tracker-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+        }
+        .wallet-tracker-table th,
+        .wallet-tracker-table td {
+            padding: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .wallet-tracker-table tbody tr:hover {
+            background: rgba(97, 218, 251, 0.08);
+        }
+        .wallet-tracker-status {
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            border-radius: 8px;
+            display: none;
+        }
+        .wallet-tracker-status.is-visible {
+            display: block;
+        }
+        .wallet-tracker-status.is-success {
+            background: rgba(46, 204, 113, 0.2);
+            color: #2ecc71;
+        }
+        .wallet-tracker-status.is-error {
+            background: rgba(231, 76, 60, 0.2);
+            color: #e74c3c;
+        }
+        .wallet-tracker-status.is-info {
+            background: rgba(52, 152, 219, 0.2);
+            color: #61dafb;
+        }
+        .wallet-tracker-hash-link {
+            color: #61dafb;
+            text-decoration: none;
+        }
+        .wallet-tracker-hash-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+    <?php
+    return ob_get_clean();
+}
+
+function wallet_tracker_admin_menu()
+{
     add_menu_page(
-        'Wallet Tracker',
-        'Wallet Tracker',
+        __('Wallet Tracker', 'wallet-tracker'),
+        __('Wallet Tracker', 'wallet-tracker'),
         'manage_options',
         'wallet-tracker',
         'wallet_tracker_admin_page',
-        'dashicons-money-alt',
+        'dashicons-chart-area',
         30
     );
 }
 
-// Admin page content (embed main shortcode for consistency)
-function wallet_tracker_admin_page() {
-    wallet_tracker_enqueue_assets();
+function wallet_tracker_admin_page()
+{
     echo do_shortcode('[wallet_tracker]');
 }
 
-// Shortcode for main control page
-add_shortcode('wallet_tracker', 'wallet_tracker_shortcode');
-function wallet_tracker_shortcode($atts) {
-    wallet_tracker_enqueue_assets();
+function wallet_tracker_shortcode($atts)
+{
+    if (!current_user_can('manage_options')) {
+        return '<div class="wallet-tracker-container"><p>' . esc_html__('You do not have permission to view this page.', 'wallet-tracker') . '</p></div>';
+    }
+
+    wallet_tracker_enqueue_dependencies();
+
     ob_start();
     ?>
     <div class="wallet-tracker-container">
-        <h1>Multi-Chain Wallet Tracker - Control Panel</h1>
-        
-        <div id="config-section" class="config-section">
-            <h2>Configuration</h2>
-            <p><strong>Note:</strong> Use a single Etherscan V2 API key for both ETH and BSC (get at <a href="https://etherscan.io/myapikey" target="_blank">Etherscan API Dashboard</a>). For Solana, get free key at <a href="https://solscan.io/dapi" target="_blank">Solscan Developer Portal</a>.</p>
-            <label>Etherscan V2 API Key (for ETH/BSC): <input type="text" id="ethApiKey" placeholder="Your Etherscan V2 API Key"></label><br>
-            <label>Solscan API Key (for SOL): <input type="text" id="solApiKey" placeholder="Your Solscan API Key"></label><br>
-            <label>Discord Webhook URL: <input type="text" id="discordWebhook" placeholder="https://discord.com/api/webhooks/..."></label><br>
-            <label>Poll Interval (seconds): <input type="number" id="pollInterval" placeholder="30" min="10" max="300"></label><br>
-            <button onclick="saveConfig()">Save Config</button>
-            <div id="configStatus"></div>
-        </div>
+        <h1><?php esc_html_e('Wallet Tracker Control Panel', 'wallet-tracker'); ?></h1>
+        <div class="wallet-tracker-status" id="walletTrackerStatus"></div>
 
-        <div id="add-section" class="config-section">
-            <h2>Add Wallet/Contract</h2>
-            <p>Add an address (wallet or contract) to track any token transactions involving it (transfers to/from).</p>
-            <div class="add-form">
-                <select id="chain">
-                    <option value="eth">Ethereum (ETH)</option>
-                    <option value="bsc">Binance Smart Chain (BSC)</option>
-                    <option value="sol">Solana (SOL)</option>
-                </select>
-                <input type="text" id="address" placeholder="Wallet/Contract Address">
-                <input type="text" id="label" placeholder="Custom Label">
-                <input type="text" id="customText" placeholder="Custom Alert Text (use {token}, {amount})">
-                <button onclick="addWallet()">Add</button>
+        <section class="wallet-tracker-section">
+            <h2><?php esc_html_e('API & Webhook Configuration', 'wallet-tracker'); ?></h2>
+            <div class="wallet-tracker-grid">
+                <label>
+                    <?php esc_html_e('Etherscan API Key', 'wallet-tracker'); ?>
+                    <input type="text" id="etherscanKey" placeholder="<?php esc_attr_e('Required for Ethereum tracking', 'wallet-tracker'); ?>">
+                </label>
+                <label>
+                    <?php esc_html_e('BscScan API Key', 'wallet-tracker'); ?>
+                    <input type="text" id="bscscanKey" placeholder="<?php esc_attr_e('Required for BSC tracking', 'wallet-tracker'); ?>">
+                </label>
+                <label>
+                    <?php esc_html_e('Discord Webhook URL', 'wallet-tracker'); ?>
+                    <input type="text" id="discordWebhook" placeholder="https://discord.com/api/webhooks/...">
+                </label>
+                <label>
+                    <?php esc_html_e('Poll Interval (seconds)', 'wallet-tracker'); ?>
+                    <input type="number" id="pollInterval" min="60" max="3600">
+                </label>
             </div>
-            <div id="addStatus"></div>
-        </div>
+            <button class="wallet-tracker-button" id="saveConfigButton"><?php esc_html_e('Save Configuration', 'wallet-tracker'); ?></button>
+        </section>
 
-        <div class="config-section">
-            <h2>Search by Label</h2>
-            <input type="text" id="searchInput" class="search-input" placeholder="Search wallets by label..." oninput="filterWallets()">
-        </div>
+        <section class="wallet-tracker-section">
+            <h2><?php esc_html_e('Tracked Wallets', 'wallet-tracker'); ?></h2>
+            <div class="wallet-tracker-grid">
+                <label>
+                    <?php esc_html_e('Chain', 'wallet-tracker'); ?>
+                    <select id="walletChain">
+                        <option value="eth"><?php esc_html_e('Ethereum', 'wallet-tracker'); ?></option>
+                        <option value="bsc"><?php esc_html_e('Binance Smart Chain', 'wallet-tracker'); ?></option>
+                    </select>
+                </label>
+                <label>
+                    <?php esc_html_e('Wallet Address', 'wallet-tracker'); ?>
+                    <input type="text" id="walletAddress" placeholder="0x...">
+                </label>
+                <label>
+                    <?php esc_html_e('Label', 'wallet-tracker'); ?>
+                    <input type="text" id="walletLabel" placeholder="My hot wallet">
+                </label>
+                <label>
+                    <?php esc_html_e('Discord Message Template', 'wallet-tracker'); ?>
+                    <input type="text" id="walletMessage" placeholder="New {chain} tx for {label}: {amount} {token}">
+                </label>
+            </div>
+            <div class="wallet-tracker-actions">
+                <button class="wallet-tracker-button" id="addWalletButton"><?php esc_html_e('Add Wallet', 'wallet-tracker'); ?></button>
+                <button class="wallet-tracker-button wallet-tracker-secondary" id="refreshButton"><?php esc_html_e('Refresh Data', 'wallet-tracker'); ?></button>
+                <button class="wallet-tracker-button wallet-tracker-danger" id="clearLogsButton"><?php esc_html_e('Clear Logs', 'wallet-tracker'); ?></button>
+            </div>
+            <div class="wallet-table-wrapper">
+                <table class="wallet-tracker-table" id="walletTable">
+                    <thead>
+                        <tr>
+                            <th><?php esc_html_e('Label', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Chain', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Address', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Message Template', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Actions', 'wallet-tracker'); ?></th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
 
-        <div class="config-section">
-            <h2>Actions</h2>
-            <button onclick="manualCheck()">Manual Check for New Tx</button>
-            <button onclick="exportWallets()">Export Wallets (JSON)</button>
-            <button onclick="togglePolling()">Toggle Polling</button>
-            <div id="pollingStatus"></div>
-        </div>
-
-        <div id="wallet-section" class="wallet-list">
-            <h2>Tracked Wallets/Contracts</h2>
-            <div id="walletContainer"></div>
-            <div id="pagination"></div>
-        </div>
-
-        <div id="globalStatus" class="status hidden"></div>
+        <section class="wallet-tracker-section">
+            <h2><?php esc_html_e('Transaction Logs', 'wallet-tracker'); ?></h2>
+            <p><?php esc_html_e('Most recent transactions are shown first. Logs are stored in WordPress and alerts are sent to Discord using your webhook.', 'wallet-tracker'); ?></p>
+            <div class="wallet-table-wrapper">
+                <table class="wallet-tracker-table" id="logTable">
+                    <thead>
+                        <tr>
+                            <th><?php esc_html_e('Time', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Label', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Chain', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Direction', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Amount', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Token', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('From', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('To', 'wallet-tracker'); ?></th>
+                            <th><?php esc_html_e('Hash', 'wallet-tracker'); ?></th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
     </div>
-
-    <style>
-        body { background-color: #1a1a1a !important; }
-        .wallet-tracker-container { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background-color: #1a1a1a !important; 
-            color: #ffffff; 
-            padding: 20px; 
-            max-width: 1200px; 
-            width: 100%; 
-            margin: 0 auto; 
-            box-sizing: border-box;
-        }
-        .config-section { background: #2a2a2a; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-        input, select, button { padding: 10px; margin: 5px; border: none; border-radius: 4px; background: #3a3a3a; color: #fff; }
-        button { background: #00ff88; color: #000; cursor: pointer; }
-        button:hover { background: #00cc66; }
-        .wallet-list { background: #2a2a2a; padding: 20px; border-radius: 8px; }
-        .wallet-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid #444; flex-wrap: wrap; gap: 10px; }
-        .wallet-item:last-child { border-bottom: none; }
-        .remove-btn { background: #ff4444; color: #fff; }
-        .search-input { width: 100%; margin-bottom: 20px; }
-        .add-form { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-        .status { text-align: center; margin: 10px 0; padding: 10px; border-radius: 4px; }
-        .success { background: #00ff88; color: #000; }
-        .error { background: #ff4444; color: #fff; }
-        .hidden { display: none; }
-        .polling-on { color: #00ff88; }
-        .polling-off { color: #ff4444; }
-        h1, h2 { color: #00ff88; }
-        .tx-item { background: #2a2a2a; padding: 10px; border-radius: 4px; margin: 5px 0; }
-        .log-item { font-size: 0.9em; padding: 5px; border-left: 3px solid #00ff88; margin: 5px 0; }
-        a { color: #00ff88; }
-        .pagination {
-            text-align: center;
-            margin-top: 20px;
-        }
-        .pagination button {
-            background: #00ff88;
-            color: #000;
-            padding: 5px 10px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            margin: 0 5px;
-        }
-        .pagination button:hover {
-            background: #00cc66;
-        }
-    </style>
+    <?php echo wallet_tracker_render_styles(); ?>
 
     <script>
-        // Use localized vars if available, fallback to hardcoded
-        const ajaxurl = window.wallet_ajax ? window.wallet_ajax.ajaxurl : '<?php echo esc_js(admin_url('admin-ajax.php')); ?>';
-        const wallet_nonce = window.wallet_ajax ? window.wallet_ajax.nonce : '<?php echo esc_js(wp_create_nonce('wallet_tracker_nonce')); ?>';
-
-        // Constants - V2 for ETH/BSC, Solscan for SOL
-        const SCAN_APIS = {
-            eth: 'https://api.etherscan.io/v2/api',
-            bsc: 'https://api.etherscan.io/v2/api',
-            sol: 'https://public-api.solscan.io'
+        window.walletTrackerAjax = {
+            url: '<?php echo esc_url(admin_url('admin-ajax.php')); ?>',
+            nonce: '<?php echo esc_js(wp_create_nonce('wallet_tracker_nonce')); ?>'
         };
+    </script>
+    <script>
+        (function ($) {
+            const ajaxConfig = window.walletTrackerAjax || {};
+            const tracker = {
+                data: null,
+                init() {
+                    this.cache();
+                    this.bindEvents();
+                    this.load();
+                },
+                cache() {
+                    this.$status = $('#walletTrackerStatus');
+                    this.$etherscan = $('#etherscanKey');
+                    this.$bscscan = $('#bscscanKey');
+                    this.$webhook = $('#discordWebhook');
+                    this.$interval = $('#pollInterval');
+                    this.$walletTable = $('#walletTable tbody');
+                    this.$logTable = $('#logTable tbody');
+                    this.$chain = $('#walletChain');
+                    this.$address = $('#walletAddress');
+                    this.$label = $('#walletLabel');
+                    this.$message = $('#walletMessage');
+                },
+                bindEvents() {
+                    $('#saveConfigButton').on('click', () => this.saveConfig());
+                    $('#addWalletButton').on('click', () => this.addWallet());
+                    $('#refreshButton').on('click', () => this.load());
+                    $('#clearLogsButton').on('click', () => this.clearLogs());
+                },
+                load() {
+                    this.setStatus('<?php echo esc_js(__('Loading data...', 'wallet-tracker')); ?>', 'info');
+                    $.post(ajaxConfig.url, {
+                        action: 'wallet_tracker_load',
+                        nonce: ajaxConfig.nonce
+                    }).done((response) => {
+                        if (response.success) {
+                            this.data = response.data;
+                            this.render();
+                            this.setStatus('<?php echo esc_js(__('Data loaded.', 'wallet-tracker')); ?>', 'success');
+                        } else {
+                            this.setStatus(response.data || response.message || '<?php echo esc_js(__('Failed to load data.', 'wallet-tracker')); ?>', 'error');
+                        }
+                    }).fail(() => {
+                        this.setStatus('<?php echo esc_js(__('Unable to contact server.', 'wallet-tracker')); ?>', 'error');
+                    });
+                },
+                persist(payload) {
+                    return $.post(ajaxConfig.url, {
+                        action: 'wallet_tracker_save',
+                        nonce: ajaxConfig.nonce,
+                        data: JSON.stringify(payload)
+                    });
+                },
+                saveConfig() {
+                    if (!this.data) {
+                        return;
+                    }
+                    this.data.config.etherscanKey = this.$etherscan.val().trim();
+                    this.data.config.bscscanKey = this.$bscscan.val().trim();
+                    this.data.config.discordWebhook = this.$webhook.val().trim();
+                    this.data.config.pollInterval = parseInt(this.$interval.val(), 10) || this.data.config.pollInterval;
 
-        // Data
-        let data = {wallets: [], config: {pollInterval: 30}, logs: [], latestTxs: {}};
-        let wallets;
-        let config;
-        let logs;
-        let latestTxs;
-        let pollIntervalId;
-        let isPolling = localStorage.getItem('isPolling') !== 'false';
-        let currentPage = 1;
-        let currentSearch = '';
-
-        // AJAX functions
-        async function loadData() {
-            console.log('Loading data...');
-            const formData = new FormData();
-            formData.append('action', 'wallet_tracker_load');
-            formData.append('nonce', wallet_nonce);
-            try {
-                const response = await fetch(ajaxurl, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                console.log('Load response:', result);
-                if (result.success) {
-                    return result.data;
-                } else {
-                    console.error('Load failed:', result.data);
-                    return {wallets: [], config: {pollInterval:30}, logs:[], latestTxs:{}};
+                    this.setStatus('<?php echo esc_js(__('Saving configuration...', 'wallet-tracker')); ?>', 'info');
+                    this.persist({ config: this.data.config }).done((response) => {
+                        if (response.success) {
+                            this.data = response.data;
+                            this.renderConfig();
+                            this.setStatus('<?php echo esc_js(__('Configuration saved.', 'wallet-tracker')); ?>', 'success');
+                        } else {
+                            this.setStatus(response.data || response.message || '<?php echo esc_js(__('Unable to save configuration.', 'wallet-tracker')); ?>', 'error');
+                        }
+                    }).fail(() => {
+                        this.setStatus('<?php echo esc_js(__('Unable to contact server.', 'wallet-tracker')); ?>', 'error');
+                    });
+                },
+                addWallet() {
+                    if (!this.data) {
+                        return;
+                    }
+                    const chain = this.$chain.val();
+                    const address = this.$address.val().trim();
+                    if (!address) {
+                        this.setStatus('<?php echo esc_js(__('Please provide a wallet address.', 'wallet-tracker')); ?>', 'error');
+                        return;
+                    }
+                    const wallet = {
+                        id: 'temp_' + Date.now(),
+                        chain: chain,
+                        address: address,
+                        label: this.$label.val().trim(),
+                        customText: this.$message.val().trim()
+                    };
+                    this.data.wallets.push(wallet);
+                    this.setStatus('<?php echo esc_js(__('Saving wallet...', 'wallet-tracker')); ?>', 'info');
+                    this.persist({ wallets: this.data.wallets }).done((response) => {
+                        if (response.success) {
+                            this.data = response.data;
+                            this.renderWallets();
+                            this.clearWalletForm();
+                            this.setStatus('<?php echo esc_js(__('Wallet saved.', 'wallet-tracker')); ?>', 'success');
+                        } else {
+                            this.setStatus(response.data || response.message || '<?php echo esc_js(__('Unable to save wallet.', 'wallet-tracker')); ?>', 'error');
+                        }
+                    }).fail(() => {
+                        this.setStatus('<?php echo esc_js(__('Unable to contact server.', 'wallet-tracker')); ?>', 'error');
+                    });
+                },
+                removeWallet(id) {
+                    if (!this.data) {
+                        return;
+                    }
+                    this.data.wallets = this.data.wallets.filter((wallet) => wallet.id !== id);
+                    this.setStatus('<?php echo esc_js(__('Updating wallets...', 'wallet-tracker')); ?>', 'info');
+                    this.persist({ wallets: this.data.wallets }).done((response) => {
+                        if (response.success) {
+                            this.data = response.data;
+                            this.renderWallets();
+                            this.setStatus('<?php echo esc_js(__('Wallet removed.', 'wallet-tracker')); ?>', 'success');
+                        } else {
+                            this.setStatus(response.data || response.message || '<?php echo esc_js(__('Unable to update wallets.', 'wallet-tracker')); ?>', 'error');
+                        }
+                    }).fail(() => {
+                        this.setStatus('<?php echo esc_js(__('Unable to contact server.', 'wallet-tracker')); ?>', 'error');
+                    });
+                },
+                clearLogs() {
+                    if (!this.data) {
+                        return;
+                    }
+                    if (!window.confirm('<?php echo esc_js(__('Clear all stored logs?', 'wallet-tracker')); ?>')) {
+                        return;
+                    }
+                    this.setStatus('<?php echo esc_js(__('Clearing logs...', 'wallet-tracker')); ?>', 'info');
+                    this.persist({ logs: [] }).done((response) => {
+                        if (response.success) {
+                            this.data = response.data;
+                            this.renderLogs();
+                            this.setStatus('<?php echo esc_js(__('Logs cleared.', 'wallet-tracker')); ?>', 'success');
+                        } else {
+                            this.setStatus(response.data || response.message || '<?php echo esc_js(__('Unable to clear logs.', 'wallet-tracker')); ?>', 'error');
+                        }
+                    }).fail(() => {
+                        this.setStatus('<?php echo esc_js(__('Unable to contact server.', 'wallet-tracker')); ?>', 'error');
+                    });
+                },
+                clearWalletForm() {
+                    this.$address.val('');
+                    this.$label.val('');
+                    this.$message.val('');
+                },
+                render() {
+                    if (!this.data) {
+                        return;
+                    }
+                    this.renderConfig();
+                    this.renderWallets();
+                    this.renderLogs();
+                },
+                renderConfig() {
+                    this.$etherscan.val(this.data.config.etherscanKey || '');
+                    this.$bscscan.val(this.data.config.bscscanKey || '');
+                    this.$webhook.val(this.data.config.discordWebhook || '');
+                    this.$interval.val(this.data.config.pollInterval || 300);
+                },
+                renderWallets() {
+                    this.$walletTable.empty();
+                    if (!this.data.wallets.length) {
+                        this.$walletTable.append('<tr><td colspan="5"><?php echo esc_js(__('No wallets tracked yet.', 'wallet-tracker')); ?></td></tr>');
+                        return;
+                    }
+                    this.data.wallets.forEach((wallet) => {
+                        const row = $('<tr></tr>');
+                        row.append($('<td></td>').text(wallet.label || '<?php echo esc_js(__('Unlabeled', 'wallet-tracker')); ?>'));
+                        row.append($('<td></td>').text(wallet.chain === 'bsc' ? 'BSC' : 'ETH'));
+                        row.append($('<td></td>').text(wallet.address));
+                        row.append($('<td></td>').text(wallet.customText || '<?php echo esc_js(__('Default message', 'wallet-tracker')); ?>'));
+                        const $actions = $('<td></td>');
+                        $('<button class="wallet-tracker-button wallet-tracker-danger"></button>')
+                            .text('<?php echo esc_js(__('Remove', 'wallet-tracker')); ?>')
+                            .on('click', () => this.removeWallet(wallet.id))
+                            .appendTo($actions);
+                        row.append($actions);
+                        this.$walletTable.append(row);
+                    });
+                },
+                renderLogs() {
+                    this.$logTable.empty();
+                    if (!this.data.logs.length) {
+                        this.$logTable.append('<tr><td colspan="9"><?php echo esc_js(__('No transactions recorded yet.', 'wallet-tracker')); ?></td></tr>');
+                        return;
+                    }
+                    this.data.logs.forEach((log) => {
+                        const row = $('<tr></tr>');
+                        row.append($('<td></td>').text(this.formatDate(log.timestamp)));
+                        row.append($('<td></td>').text(log.label || '<?php echo esc_js(__('Unlabeled', 'wallet-tracker')); ?>'));
+                        row.append($('<td></td>').text(log.chain === 'bsc' ? 'BSC' : 'ETH'));
+                        row.append($('<td></td>').text(log.direction === 'in' ? '<?php echo esc_js(__('In', 'wallet-tracker')); ?>' : '<?php echo esc_js(__('Out', 'wallet-tracker')); ?>'));
+                        row.append($('<td></td>').text(log.amount));
+                        row.append($('<td></td>').text(log.token));
+                        row.append($('<td></td>').text(log.from));
+                        row.append($('<td></td>').text(log.to));
+                        if (log.txUrl) {
+                            row.append($('<td></td>').append($('<a></a>').attr('href', log.txUrl).attr('target', '_blank').addClass('wallet-tracker-hash-link').text(log.hash)));
+                        } else {
+                            row.append($('<td></td>').text(log.hash));
+                        }
+                        this.$logTable.append(row);
+                    });
+                },
+                formatDate(timestamp) {
+                    if (!timestamp) {
+                        return '';
+                    }
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleString();
+                },
+                setStatus(message, type) {
+                    this.$status
+                        .removeClass('is-success is-error is-info is-visible')
+                        .addClass(type ? 'is-' + type : '')
+                        .addClass('is-visible')
+                        .text(message);
                 }
-            } catch (error) {
-                console.error('Load error:', error);
-                return {wallets: [], config: {pollInterval:30}, logs:[], latestTxs:{}};
-            }
-        }
-
-        async function saveData(serverData) {
-            console.log('Saving data...', serverData);
-            const formData = new FormData();
-            formData.append('action', 'wallet_tracker_save');
-            formData.append('nonce', wallet_nonce);
-            formData.append('data', JSON.stringify(serverData));
-            try {
-                const response = await fetch(ajaxurl, {
-                    method: 'POST',
-                    body: formData
-                });
-                const text = await response.text();
-                console.log('Save response text:', text);
-                const result = JSON.parse(text);
-                console.log('Save response:', result);
-                return result.success;
-            } catch (error) {
-                console.error('Save error:', error);
-                return false;
-            }
-        }
-
-        // Initialize
-        document.addEventListener('DOMContentLoaded', async () => {
-            console.log('DOM loaded, ajaxurl:', ajaxurl, 'nonce:', wallet_nonce);
-            data = await loadData();
-            wallets = [...(data.wallets || [])];
-            config = { ...data.config, pollInterval: data.config.pollInterval || 30 };
-            logs = [...(data.logs || [])];
-            latestTxs = { ...data.latestTxs };
-            loadConfig();
-            renderWallets();
-            if (isPolling) startPolling();
-            updatePollingStatus();
-        });
-
-        function loadConfig() {
-            const ethInput = document.getElementById('ethApiKey');
-            if (ethInput) ethInput.value = config.ethApiKey || '';
-            const solInput = document.getElementById('solApiKey');
-            if (solInput) solInput.value = config.solApiKey || '';
-            const discordInput = document.getElementById('discordWebhook');
-            if (discordInput) discordInput.value = config.discordWebhook || '';
-            const pollInput = document.getElementById('pollInterval');
-            if (pollInput) pollInput.value = config.pollInterval || 30;
-        }
-
-        async function saveConfig() {
-            const ethInput = document.getElementById('ethApiKey');
-            if (ethInput) config.ethApiKey = ethInput.value.trim();
-            const solInput = document.getElementById('solApiKey');
-            if (solInput) config.solApiKey = solInput.value.trim();
-            const discordInput = document.getElementById('discordWebhook');
-            if (discordInput) config.discordWebhook = discordInput.value.trim();
-            const pollInput = document.getElementById('pollInterval');
-            if (pollInput) config.pollInterval = parseInt(pollInput.value) || 30;
-
-            data.config = { ...config };
-            const saveSuccess = await saveData(data);
-            if (saveSuccess) {
-                showStatus('configStatus', 'Config saved successfully!', 'success');
-                if (isPolling) startPolling();
-            } else {
-                showStatus('configStatus', 'Failed to save config. Check console for errors.', 'error');
-            }
-        }
-
-        window.saveConfig = saveConfig;
-
-        async function addWallet() {
-            const chainSelect = document.getElementById('chain');
-            const addressInput = document.getElementById('address');
-            const labelInput = document.getElementById('label');
-            const customTextInput = document.getElementById('customText');
-            
-            if (!chainSelect || !addressInput || !labelInput) return;
-            
-            const chain = chainSelect.value;
-            const address = addressInput.value.trim();
-            const label = labelInput.value.trim();
-            const customText = customTextInput ? customTextInput.value.trim() : '';
-
-            if (!address || !label) {
-                showStatus('addStatus', 'Address and label required!', 'error');
-                return;
-            }
-
-            if (chain === 'sol' && address.length !== 44) {
-                showStatus('addStatus', 'Invalid Solana address!', 'error');
-                return;
-            } else if ((chain === 'eth' || chain === 'bsc') && !(/^0x[a-fA-F0-9]{40}$/.test(address))) {
-                showStatus('addStatus', 'Invalid ETH/BSC address!', 'error');
-                return;
-            }
-
-            const wallet = {
-                chain,
-                address: address.toLowerCase(),
-                label,
-                customText: customText || `New {token} transfer on {label}: {amount} tokens.`,
-                lastBlock: 0,
-                lastSignature: null
             };
 
-            wallets.push(wallet);
-            data.wallets = [...wallets];
-            const saveSuccess = await saveData(data);
-            if (!saveSuccess) {
-                showStatus('addStatus', 'Added locally but failed to save to backend. Check console.', 'error');
-                wallets.pop(); // Revert local add on fail
-                return;
-            }
-
-            if (wallet.chain !== 'sol') {
-                await setInitialBlock(wallet);
-            }
-
-            renderWallets();
-            addressInput.value = '';
-            labelInput.value = '';
-            if (customTextInput) customTextInput.value = '';
-            showStatus('addStatus', 'Wallet/Contract added!', 'success');
-        }
-
-        window.addWallet = addWallet;
-
-        async function setInitialBlock(wallet) {
-            const apiKey = config.ethApiKey;
-            if (!apiKey) return;
-
-            const chainId = wallet.chain === 'eth' ? '1' : '56';
-            const params = new URLSearchParams({
-                module: 'proxy',
-                action: 'eth_blockNumber',
-                chainid: chainId,
-                apikey: apiKey
-            });
-
-            try {
-                const response = await fetch(`${SCAN_APIS[wallet.chain]}?${params}`);
-                const responseData = await response.json();
-
-                if (responseData.status === '1' && responseData.result) {
-                    const currentBlock = parseInt(responseData.result, 16);
-                    wallet.lastBlock = currentBlock - 1;
-                    data.wallets = [...wallets];
-                    await saveData(data);
-                }
-            } catch (error) {
-                console.error('Error setting initial block:', error);
-            }
-        }
-
-        async function removeWallet(index) {
-            const removedWallet = wallets[index];
-            wallets.splice(index, 1);
-            logs = logs.filter(log => log.walletAddress !== removedWallet.address);
-            delete latestTxs[removedWallet.address];
-            data.wallets = [...wallets];
-            data.logs = [...logs];
-            data.latestTxs = { ...latestTxs };
-            const saveSuccess = await saveData(data);
-            if (!saveSuccess) {
-                showGlobalStatus('Remove succeeded locally but backend save failed. Check console.', 'error');
-            }
-            renderWallets();
-        }
-
-        window.removeWallet = removeWallet;
-
-        function renderWallets() {
-            let displayWallets = wallets;
-            if (currentSearch) {
-                displayWallets = wallets.filter(w => w.label.toLowerCase().includes(currentSearch));
-            }
-            const pageSize = 25;
-            const totalPages = Math.ceil(displayWallets.length / pageSize);
-            currentPage = Math.min(currentPage, totalPages) || 1;
-            const start = (currentPage - 1) * pageSize;
-            const pagedWallets = displayWallets.slice(start, start + pageSize);
-
-            const container = document.getElementById('walletContainer');
-            if (container) {
-                container.innerHTML = pagedWallets.map((wallet, idx) => {
-                    const originalIndex = wallets.indexOf(wallet);
-                    const lastTx = latestTxs[wallet.address] ? `Last Tx: ${latestTxs[wallet.address].hash.slice(0,10)}...` : 'No Tx Yet';
-                    return `
-                        <div class="wallet-item" data-original-index="${originalIndex}">
-                            <span><strong>${wallet.label}</strong> (${wallet.chain.toUpperCase()}: ${wallet.address.slice(0,8)}...)</span>
-                            <span>${lastTx}</span>
-                            <span>${wallet.customText}</span>
-                            <button class="remove-btn" onclick="removeWallet(${originalIndex})">Remove</button>
-                        </div>
-                    `;
-                }).join('');
-            }
-
-            // Pagination
-            const pagEl = document.getElementById('pagination');
-            if (pagEl) {
-                let pagHtml = '';
-                if (totalPages > 1) {
-                    pagHtml = `<div class="pagination">`;
-                    if (currentPage > 1) {
-                        pagHtml += `<button onclick="prevPage()">Prev</button>`;
-                    }
-                    pagHtml += `Page ${currentPage} of ${totalPages}`;
-                    if (currentPage < totalPages) {
-                        pagHtml += `<button onclick="nextPage()">Next</button>`;
-                    }
-                    pagHtml += `</div>`;
-                }
-                pagEl.innerHTML = pagHtml;
-            }
-        }
-
-        window.renderWallets = renderWallets;
-
-        function filterWallets() {
-            const searchInput = document.getElementById('searchInput');
-            if (searchInput) {
-                currentSearch = searchInput.value.toLowerCase();
-            }
-            currentPage = 1;
-            renderWallets();
-        }
-
-        window.filterWallets = filterWallets;
-
-        window.prevPage = () => {
-            currentPage--;
-            renderWallets();
-        };
-
-        window.nextPage = () => {
-            currentPage++;
-            renderWallets();
-        };
-
-        function showStatus(id, message, type) {
-            const el = document.getElementById(id);
-            if (el) {
-                el.textContent = message;
-                el.className = `status ${type}`;
-                el.classList.remove('hidden');
-                setTimeout(() => el.classList.add('hidden'), 3000);
-            }
-        }
-
-        function showGlobalStatus(message, type) {
-            const el = document.getElementById('globalStatus');
-            if (el) {
-                el.textContent = message;
-                el.className = `status ${type}`;
-                el.classList.remove('hidden');
-                setTimeout(() => el.classList.add('hidden'), 5000);
-            }
-        }
-
-        async function sendDiscordAlert(message, walletAddress) {
-            if (!config.discordWebhook) {
-                console.warn('No Discord webhook configured');
-                return;
-            }
-            try {
-                const response = await fetch(config.discordWebhook, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: message })
-                });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            } catch (error) {
-                console.error('Discord alert failed:', error);
-            }
-        }
-
-        async function logTx(walletAddress, txHash, chain, timestamp = new Date().toISOString()) {
-            const logEntry = { walletAddress, txHash, chain, timestamp };
-            logs.unshift(logEntry);
-            if (logs.length > 100) logs = logs.slice(0, 100);
-            latestTxs[walletAddress] = { hash: txHash, timestamp };
-            data.logs = [...logs];
-            data.latestTxs = { ...latestTxs };
-            await saveData(data);
-        }
-
-        async function checkWallet(wallet) {
-            try {
-                if (wallet.chain === 'sol') {
-                    await checkSolWallet(wallet);
-                } else {
-                    await checkScanWallet(wallet);
-                }
-            } catch (error) {
-                console.error(`Error checking ${wallet.label}:`, error);
-            }
-        }
-
-        async function checkScanWallet(wallet) {
-            const apiKey = config.ethApiKey;
-            if (!apiKey) return;
-
-            const chainId = wallet.chain === 'eth' ? '1' : '56';
-            const params = new URLSearchParams({
-                module: 'account',
-                action: 'tokentx',
-                address: wallet.address,
-                startblock: wallet.lastBlock + 1,
-                endblock: 99999999,
-                page: 1,
-                offset: 10,
-                sort: 'desc',
-                chainid: chainId,
-                apikey: apiKey
-            });
-
-            const response = await fetch(`${SCAN_APIS[wallet.chain]}?${params}`);
-            const responseData = await response.json();
-
-            if (responseData.status !== '1') return;
-
-            const txs = responseData.result || [];
-            let newTx = false;
-            let latestBlock = wallet.lastBlock;
-            let latestTxDetails = null;
-
-            for (const tx of txs) {
-                if (tx.from.toLowerCase() === wallet.address || tx.to.toLowerCase() === wallet.address) {
-                    newTx = true;
-                    latestBlock = Math.max(latestBlock, parseInt(tx.blockNumber));
-                    latestTxDetails = {
-                        hash: tx.hash,
-                        token: tx.tokenSymbol || 'Unknown',
-                        amount: parseFloat(tx.value) / Math.pow(10, parseInt(tx.tokenDecimal || 18))
-                    };
-                }
-            }
-
-            if (newTx && latestTxDetails) {
-                wallet.lastBlock = latestBlock;
-                data.wallets = [...wallets];
-                await saveData(data);
-                const replacedCustom = wallet.customText
-                    .replace('{label}', wallet.label)
-                    .replace('{token}', latestTxDetails.token)
-                    .replace('{amount}', latestTxDetails.amount.toFixed(4));
-                const alertMsg = `New transaction detected for ${wallet.label} on ${wallet.chain.toUpperCase()}!\nToken: ${latestTxDetails.token}\nAmount: ${latestTxDetails.amount.toFixed(4)}\n\n${replacedCustom}`;
-                await sendDiscordAlert(alertMsg, wallet.address);
-                await logTx(wallet.address, latestTxDetails.hash, wallet.chain);
-                showGlobalStatus(`Alert: ${wallet.label} detected new ${latestTxDetails.token} transaction!`, 'success');
-            }
-        }
-
-        async function checkSolWallet(wallet) {
-            const apiKey = config.solApiKey;
-            if (!apiKey) return;
-
-            const params = new URLSearchParams({
-                address: wallet.address,
-                offset: 0,
-                limit: 10
-            });
-
-            const response = await fetch(`${SCAN_APIS.sol}/account/tokentxns?${params}`, {
-                headers: { 'Authorization': `Bearer ${apiKey}` }
-            });
-            const responseData = await response.json();
-
-            if (!responseData.data || responseData.data.length === 0) return;
-
-            const txs = responseData.data;
-            let newTx = false;
-            let latestTxDetails = null;
-            let latestSig = wallet.lastSignature;
-
-            for (const tx of txs) {
-                if (!latestSig || tx.signature > latestSig) {
-                    newTx = true;
-                    latestSig = tx.signature;
-                    latestTxDetails = {
-                        hash: tx.signature,
-                        token: tx.mint || 'SOL',
-                        amount: parseFloat(tx.tokenAmount ? tx.tokenAmount.raw : (tx.lamports || 0)) / 1e9
-                    };
-                }
-            }
-
-            if (newTx && latestTxDetails) {
-                wallet.lastSignature = latestSig;
-                data.wallets = [...wallets];
-                await saveData(data);
-                const replacedCustom = wallet.customText
-                    .replace('{label}', wallet.label)
-                    .replace('{token}', latestTxDetails.token)
-                    .replace('{amount}', latestTxDetails.amount.toFixed(4));
-                const alertMsg = `New transaction detected for ${wallet.label} on ${wallet.chain.toUpperCase()}!\nToken: ${latestTxDetails.token}\nAmount: ${latestTxDetails.amount.toFixed(4)}\n\n${replacedCustom}`;
-                await sendDiscordAlert(alertMsg, wallet.address);
-                await logTx(wallet.address, latestTxDetails.hash, wallet.chain);
-                showGlobalStatus(`Alert: ${wallet.label} detected new ${latestTxDetails.token} transaction!`, 'success');
-            }
-        }
-
-        async function manualCheck() {
-            showGlobalStatus('Manual check in progress...', 'success');
-            for (const wallet of wallets) {
-                await checkWallet(wallet);
-            }
-            showGlobalStatus('Manual check complete!', 'success');
-        }
-
-        window.manualCheck = manualCheck;
-
-        function exportWallets() {
-            const dataStr = JSON.stringify(data, null, 2);
-            const dataBlob = new Blob([dataStr], { type: 'application/json' });
-            const url = URL.createObjectURL(dataBlob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = 'wallet-tracker-backup.json';
-            link.click();
-            URL.revokeObjectURL(url);
-        }
-
-        window.exportWallets = exportWallets;
-
-        function togglePolling() {
-            isPolling = !isPolling;
-            localStorage.setItem('isPolling', isPolling);
-            if (isPolling) {
-                startPolling();
-            } else {
-                if (pollIntervalId) {
-                    clearInterval(pollIntervalId);
-                    pollIntervalId = null;
-                }
-            }
-            updatePollingStatus();
-        }
-
-        window.togglePolling = togglePolling;
-
-        function updatePollingStatus() {
-            const el = document.getElementById('pollingStatus');
-            if (el) {
-                el.textContent = isPolling ? `Polling: ON (every ${config.pollInterval}s)` : 'Polling: OFF';
-                el.className = `status ${isPolling ? 'success polling-on' : 'error polling-off'}`;
-            }
-        }
-
-        function startPolling() {
-            if (pollIntervalId) clearInterval(pollIntervalId);
-            if (wallets.length === 0 || (!config.ethApiKey && wallets.some(w => w.chain !== 'sol')) || (!config.solApiKey && wallets.some(w => w.chain === 'sol'))) {
-                console.warn('Cannot start polling: Missing API keys or no wallets');
-                return;
-            }
-
-            const intervalMs = (config.pollInterval || 30) * 1000;
-            pollIntervalId = setInterval(async () => {
-                for (const wallet of wallets) {
-                    await checkWallet(wallet);
-                }
-            }, intervalMs);
-
-            setTimeout(async () => {
-                for (const wallet of wallets) {
-                    await checkWallet(wallet);
-                }
-            }, 1000);
-        }
-
-        // Globals
-        window.showStatus = showStatus;
+            $(document).ready(() => tracker.init());
+        })(jQuery);
     </script>
     <?php
     return ob_get_clean();
 }
 
-// Shortcode for Latest Transactions Page
-add_shortcode('wallet_latest_tx', 'wallet_latest_tx_shortcode');
-function wallet_latest_tx_shortcode($atts) {
-    wallet_tracker_enqueue_assets();
-    ob_start();
-    ?>
-    <div class="wallet-tracker-container">
-        <h1>Latest Transactions</h1>
-        <div id="latestTxContainer"></div>
-        <button onclick="clearLatestTxs()">Clear All</button>
-    </div>
-
-    <style>
-        body { background-color: #1a1a1a !important; }
-        .wallet-tracker-container { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background-color: #1a1a1a !important; 
-            color: #ffffff; 
-            padding: 20px; 
-            max-width: 1200px; 
-            width: 100%; 
-            margin: 0 auto; 
-            box-sizing: border-box;
-        }
-        .tx-item { background: #2a2a2a; padding: 15px; border-radius: 8px; margin: 10px 0; }
-        button { background: #00ff88; color: #000; padding: 10px; border: none; border-radius: 4px; cursor: pointer; }
-        h1 { color: #00ff88; }
-        a { color: #00ff88; }
-    </style>
-
-    <script>
-        // Use localized vars
-        const ajaxurl = window.wallet_ajax ? window.wallet_ajax.ajaxurl : '<?php echo esc_js(admin_url('admin-ajax.php')); ?>';
-        const wallet_nonce = window.wallet_ajax ? window.wallet_ajax.nonce : '<?php echo esc_js(wp_create_nonce('wallet_tracker_nonce')); ?>';
-
-        let data = {wallets: [], latestTxs: {}};
-        let latestTxs = {};
-        let wallets = [];
-
-        async function loadData() {
-            const formData = new FormData();
-            formData.append('action', 'wallet_tracker_load');
-            formData.append('nonce', wallet_nonce);
-            try {
-                const response = await fetch(ajaxurl, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                if (result.success) {
-                    return result.data;
-                } else {
-                    console.error('Load failed:', result.data);
-                    return {wallets: [], latestTxs: {}};
-                }
-            } catch (error) {
-                console.error('Load error:', error);
-                return {wallets: [], latestTxs: {}};
-            }
-        }
-
-        async function saveData(serverData) {
-            const formData = new FormData();
-            formData.append('action', 'wallet_tracker_save');
-            formData.append('nonce', wallet_nonce);
-            formData.append('data', JSON.stringify(serverData));
-            try {
-                const response = await fetch(ajaxurl, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                return result.success;
-            } catch (error) {
-                console.error('Save error:', error);
-                return false;
-            }
-        }
-
-        function renderLatestTxs() {
-            const container = document.getElementById('latestTxContainer');
-            if (!container) return;
-            const txList = Object.entries(latestTxs).map(([address, tx]) => {
-                const wallet = wallets.find(w => w.address === address);
-                const label = wallet ? wallet.label : address.slice(0,8) + '...';
-                return `
-                    <div class="tx-item">
-                        <strong>${label}</strong> (${tx.timestamp})<br>
-                        Chain: ${wallet ? wallet.chain.toUpperCase() : 'Unknown'}<br>
-                        Tx Hash: <a href="${getTxExplorerUrl(address, tx.hash, wallet ? wallet.chain : 'eth')}" target="_blank">${tx.hash}</a>
-                    </div>
-                `;
-            }).join('');
-            container.innerHTML = txList || '<p>No latest transactions recorded.</p>';
-        }
-
-        function getTxExplorerUrl(address, hash, chain) {
-            switch (chain) {
-                case 'eth': return `https://etherscan.io/tx/${hash}`;
-                case 'bsc': return `https://bscscan.com/tx/${hash}`;
-                case 'sol': return `https://solscan.io/tx/${hash}`;
-                default: return `https://etherscan.io/tx/${hash}`;
-            }
-        }
-
-        async function clearLatestTxs() {
-            data.latestTxs = {};
-            const saveSuccess = await saveData(data);
-            if (saveSuccess) {
-                latestTxs = data.latestTxs;
-                renderLatestTxs();
-            } else {
-                alert('Failed to clear latest TXs on backend.');
-            }
-        }
-
-        document.addEventListener('DOMContentLoaded', async () => {
-            data = await loadData();
-            wallets = [...(data.wallets || [])];
-            latestTxs = { ...data.latestTxs };
-            renderLatestTxs();
-        });
-        window.clearLatestTxs = clearLatestTxs;
-    </script>
-    <?php
-    return ob_get_clean();
-}
-
-// Shortcode for Logs Page
-add_shortcode('wallet_logs', 'wallet_logs_shortcode');
-function wallet_logs_shortcode($atts) {
-    wallet_tracker_enqueue_assets();
-    ob_start();
-    ?>
-    <div class="wallet-tracker-container">
-        <h1>Transaction Logs</h1>
-        <div id="logsContainer"></div>
-        <button onclick="clearLogs()">Clear All Logs</button>
-        <button onclick="exportLogs()">Export Logs (JSON)</button>
-    </div>
-
-    <style>
-        body { background-color: #1a1a1a !important; }
-        .wallet-tracker-container { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background-color: #1a1a1a !important; 
-            color: #ffffff; 
-            padding: 20px; 
-            max-width: 1200px; 
-            width: 100%; 
-            margin: 0 auto; 
-            box-sizing: border-box;
-        }
-        .log-item { background: #2a2a2a; padding: 10px; border-radius: 4px; margin: 5px 0; border-left: 3px solid #00ff88; }
-        button { background: #00ff88; color: #000; padding: 10px; margin: 5px; border: none; border-radius: 4px; cursor: pointer; }
-        h1 { color: #00ff88; }
-        a { color: #00ff88; }
-    </style>
-
-    <script>
-        // Use localized vars
-        const ajaxurl = window.wallet_ajax ? window.wallet_ajax.ajaxurl : '<?php echo esc_js(admin_url('admin-ajax.php')); ?>';
-        const wallet_nonce = window.wallet_ajax ? window.wallet_ajax.nonce : '<?php echo esc_js(wp_create_nonce('wallet_tracker_nonce')); ?>';
-
-        let data = {logs: [], wallets: []};
-        let logs = [];
-        let wallets = [];
-
-        async function loadData() {
-            const formData = new FormData();
-            formData.append('action', 'wallet_tracker_load');
-            formData.append('nonce', wallet_nonce);
-            try {
-                const response = await fetch(ajaxurl, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                if (result.success) {
-                    return result.data;
-                } else {
-                    console.error('Load failed:', result.data);
-                    return {logs: [], wallets: []};
-                }
-            } catch (error) {
-                console.error('Load error:', error);
-                return {logs: [], wallets: []};
-            }
-        }
-
-        async function saveData(serverData) {
-            const formData = new FormData();
-            formData.append('action', 'wallet_tracker_save');
-            formData.append('nonce', wallet_nonce);
-            formData.append('data', JSON.stringify(serverData));
-            try {
-                const response = await fetch(ajaxurl, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                return result.success;
-            } catch (error) {
-                console.error('Save error:', error);
-                return false;
-            }
-        }
-
-        function renderLogs() {
-            const container = document.getElementById('logsContainer');
-            if (!container) return;
-            const logList = logs.map(log => {
-                const wallet = wallets.find(w => w.address === log.walletAddress);
-                const label = wallet ? wallet.label : log.walletAddress.slice(0,8) + '...';
-                return `
-                    <div class="log-item">
-                        <strong>${label}</strong> (${log.chain.toUpperCase()}) - ${log.timestamp}<br>
-                        Tx Hash: <a href="${getTxExplorerUrl(log.walletAddress, log.txHash, log.chain)}" target="_blank">${log.txHash}</a>
-                    </div>
-                `;
-            }).join('');
-            container.innerHTML = logList || '<p>No logs available.</p>';
-        }
-
-        function getTxExplorerUrl(address, hash, chain) {
-            switch (chain) {
-                case 'eth': return `https://etherscan.io/tx/${hash}`;
-                case 'bsc': return `https://bscscan.com/tx/${hash}`;
-                case 'sol': return `https://solscan.io/tx/${hash}`;
-                default: return `https://etherscan.io/tx/${hash}`;
-            }
-        }
-
-        async function clearLogs() {
-            data.logs = [];
-            const saveSuccess = await saveData(data);
-            if (saveSuccess) {
-                logs = data.logs;
-                renderLogs();
-            } else {
-                alert('Failed to clear logs on backend.');
-            }
-        }
-
-        function exportLogs() {
-            const dataStr = JSON.stringify(logs, null, 2);
-            const dataBlob = new Blob([dataStr], { type: 'application/json' });
-            const url = URL.createObjectURL(dataBlob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = 'wallet-logs.json';
-            link.click();
-            URL.revokeObjectURL(url);
-        }
-
-        document.addEventListener('DOMContentLoaded', async () => {
-            data = await loadData();
-            logs = [...(data.logs || [])];
-            wallets = [...(data.wallets || [])];
-            renderLogs();
-        });
-        window.clearLogs = clearLogs;
-        window.exportLogs = exportLogs;
-    </script>
-    <?php
-    return ob_get_clean();
-}
-
-// Enqueue on frontend if shortcodes used
-add_action('wp_enqueue_scripts', 'wallet_tracker_frontend_enqueue');
-function wallet_tracker_frontend_enqueue() {
-    global $post;
-    if (is_a($post, 'WP_Post') && (has_shortcode($post->post_content, 'wallet_tracker') || has_shortcode($post->post_content, 'wallet_latest_tx') || has_shortcode($post->post_content, 'wallet_logs'))) {
-        wallet_tracker_enqueue_assets();
+function wallet_tracker_logs_shortcode($atts)
+{
+    if (!current_user_can('manage_options')) {
+        return '<div class="wallet-tracker-container"><p>' . esc_html__('You do not have permission to view this page.', 'wallet-tracker') . '</p></div>';
     }
+
+    wallet_tracker_enqueue_dependencies();
+
+    ob_start();
+    ?>
+    <div class="wallet-tracker-container">
+        <h1><?php esc_html_e('Tracked Wallet Transaction Logs', 'wallet-tracker'); ?></h1>
+        <div class="wallet-tracker-status" id="walletTrackerStatusLogs"></div>
+        <div class="wallet-table-wrapper">
+            <table class="wallet-tracker-table" id="logOnlyTable">
+                <thead>
+                    <tr>
+                        <th><?php esc_html_e('Time', 'wallet-tracker'); ?></th>
+                        <th><?php esc_html_e('Label', 'wallet-tracker'); ?></th>
+                        <th><?php esc_html_e('Chain', 'wallet-tracker'); ?></th>
+                        <th><?php esc_html_e('Direction', 'wallet-tracker'); ?></th>
+                        <th><?php esc_html_e('Amount', 'wallet-tracker'); ?></th>
+                        <th><?php esc_html_e('Token', 'wallet-tracker'); ?></th>
+                        <th><?php esc_html_e('From', 'wallet-tracker'); ?></th>
+                        <th><?php esc_html_e('To', 'wallet-tracker'); ?></th>
+                        <th><?php esc_html_e('Hash', 'wallet-tracker'); ?></th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+    <?php echo wallet_tracker_render_styles(); ?>
+    <script>
+        window.walletTrackerAjax = window.walletTrackerAjax || {
+            url: '<?php echo esc_url(admin_url('admin-ajax.php')); ?>',
+            nonce: '<?php echo esc_js(wp_create_nonce('wallet_tracker_nonce')); ?>'
+        };
+    </script>
+    <script>
+        (function ($) {
+            const ajaxConfig = window.walletTrackerAjax || {};
+            const logViewer = {
+                $status: null,
+                $table: null,
+                init() {
+                    this.$status = $('#walletTrackerStatusLogs');
+                    this.$table = $('#logOnlyTable tbody');
+                    this.load();
+                },
+                load() {
+                    this.setStatus('<?php echo esc_js(__('Loading logs...', 'wallet-tracker')); ?>', 'info');
+                    $.post(ajaxConfig.url, {
+                        action: 'wallet_tracker_load',
+                        nonce: ajaxConfig.nonce
+                    }).done((response) => {
+                        if (response.success) {
+                            this.render(response.data.logs || []);
+                            this.setStatus('<?php echo esc_js(__('Logs loaded.', 'wallet-tracker')); ?>', 'success');
+                        } else {
+                            this.setStatus(response.data || response.message || '<?php echo esc_js(__('Failed to load logs.', 'wallet-tracker')); ?>', 'error');
+                        }
+                    }).fail(() => {
+                        this.setStatus('<?php echo esc_js(__('Unable to contact server.', 'wallet-tracker')); ?>', 'error');
+                    });
+                },
+                render(logs) {
+                    this.$table.empty();
+                    if (!logs.length) {
+                        this.$table.append('<tr><td colspan="9"><?php echo esc_js(__('No transactions recorded yet.', 'wallet-tracker')); ?></td></tr>');
+                        return;
+                    }
+                    logs.forEach((log) => {
+                        const row = $('<tr></tr>');
+                        const date = new Date((log.timestamp || 0) * 1000).toLocaleString();
+                        row.append($('<td></td>').text(date));
+                        row.append($('<td></td>').text(log.label || '<?php echo esc_js(__('Unlabeled', 'wallet-tracker')); ?>'));
+                        row.append($('<td></td>').text(log.chain === 'bsc' ? 'BSC' : 'ETH'));
+                        row.append($('<td></td>').text(log.direction === 'in' ? '<?php echo esc_js(__('In', 'wallet-tracker')); ?>' : '<?php echo esc_js(__('Out', 'wallet-tracker')); ?>'));
+                        row.append($('<td></td>').text(log.amount));
+                        row.append($('<td></td>').text(log.token));
+                        row.append($('<td></td>').text(log.from));
+                        row.append($('<td></td>').text(log.to));
+                        if (log.txUrl) {
+                            row.append($('<td></td>').append($('<a></a>').attr('href', log.txUrl).attr('target', '_blank').addClass('wallet-tracker-hash-link').text(log.hash)));
+                        } else {
+                            row.append($('<td></td>').text(log.hash));
+                        }
+                        this.$table.append(row);
+                    });
+                },
+                setStatus(message, type) {
+                    this.$status
+                        .removeClass('is-success is-error is-info is-visible')
+                        .addClass(type ? 'is-' + type : '')
+                        .addClass('is-visible')
+                        .text(message);
+                }
+            };
+            $(document).ready(() => logViewer.init());
+        })(jQuery);
+    </script>
+    <?php
+    return ob_get_clean();
 }
 
-// Admin enqueue
-add_action('admin_enqueue_scripts', 'wallet_tracker_enqueue_scripts');
-function wallet_tracker_enqueue_scripts($hook) {
-    if ($hook !== 'toplevel_page_wallet-tracker') return;
-    wallet_tracker_enqueue_assets();
+function wallet_tracker_handle_load()
+{
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(__('Unauthorized', 'wallet-tracker'));
+    }
+
+    if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'wallet_tracker_nonce')) {
+        wp_send_json_error(__('Nonce verification failed', 'wallet-tracker'));
+    }
+
+    $data = wallet_tracker_get_data();
+    wp_send_json_success($data);
 }
-?>
+
+function wallet_tracker_handle_save()
+{
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(__('Unauthorized', 'wallet-tracker'));
+    }
+
+    if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'wallet_tracker_nonce')) {
+        wp_send_json_error(__('Nonce verification failed', 'wallet-tracker'));
+    }
+
+    if (!isset($_POST['data'])) {
+        wp_send_json_error(__('No data provided', 'wallet-tracker'));
+    }
+
+    $payload = json_decode(stripslashes((string)$_POST['data']), true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        wp_send_json_error(sprintf(__('Invalid JSON: %s', 'wallet-tracker'), json_last_error_msg()));
+    }
+
+    $data = wallet_tracker_get_data();
+    $originalInterval = wallet_tracker_sanitize_interval($data['config']['pollInterval']);
+
+    if (isset($payload['config']) && is_array($payload['config'])) {
+        $config = $payload['config'];
+        $data['config']['etherscanKey'] = sanitize_text_field($config['etherscanKey'] ?? '');
+        $data['config']['bscscanKey'] = sanitize_text_field($config['bscscanKey'] ?? '');
+        $data['config']['discordWebhook'] = esc_url_raw($config['discordWebhook'] ?? '');
+        $data['config']['pollInterval'] = wallet_tracker_sanitize_interval($config['pollInterval'] ?? $data['config']['pollInterval']);
+    }
+
+    if (array_key_exists('wallets', $payload) && is_array($payload['wallets'])) {
+        $data['wallets'] = wallet_tracker_sanitize_wallets($payload['wallets'], $data['wallets']);
+    }
+
+    if (isset($payload['logs']) && is_array($payload['logs']) && empty($payload['logs'])) {
+        $data['logs'] = [];
+    }
+
+    wallet_tracker_save_data($data);
+
+    $newInterval = wallet_tracker_sanitize_interval($data['config']['pollInterval']);
+    if ($newInterval !== $originalInterval) {
+        wallet_tracker_schedule_event($newInterval);
+    }
+
+    wp_send_json_success(wallet_tracker_get_data());
+}
+
+function wallet_tracker_sanitize_wallets($wallets, $existingWallets)
+{
+    $sanitized = [];
+    $existingMap = [];
+    foreach ($existingWallets as $wallet) {
+        if (!empty($wallet['id'])) {
+            $existingMap[$wallet['id']] = $wallet;
+        }
+    }
+
+    foreach ($wallets as $wallet) {
+        if (!is_array($wallet)) {
+            continue;
+        }
+
+        $id = isset($wallet['id']) && is_string($wallet['id']) ? sanitize_key(str_replace(' ', '-', $wallet['id'])) : '';
+        if (!$id) {
+            $id = 'wallet_' . uniqid();
+        }
+
+        $address = isset($wallet['address']) ? strtolower(sanitize_text_field($wallet['address'])) : '';
+        if (empty($address)) {
+            continue;
+        }
+
+        $chain = isset($wallet['chain']) && in_array($wallet['chain'], ['eth', 'bsc'], true) ? $wallet['chain'] : 'eth';
+        $label = isset($wallet['label']) ? sanitize_text_field($wallet['label']) : '';
+        $customText = isset($wallet['customText']) ? sanitize_textarea_field($wallet['customText']) : '';
+
+        $existing = $existingMap[$id] ?? [];
+        $recentHashes = [];
+        if (isset($existing['recentHashes']) && is_array($existing['recentHashes'])) {
+            $recentHashes = array_slice(array_map('sanitize_text_field', $existing['recentHashes']), -50);
+        }
+
+        $sanitized[] = [
+            'id' => $id,
+            'chain' => $chain,
+            'address' => $address,
+            'label' => $label,
+            'customText' => $customText,
+            'lastNativeBlock' => isset($existing['lastNativeBlock']) ? (int)$existing['lastNativeBlock'] : 0,
+            'lastTokenBlock' => isset($existing['lastTokenBlock']) ? (int)$existing['lastTokenBlock'] : 0,
+            'recentHashes' => $recentHashes,
+        ];
+    }
+
+    return $sanitized;
+}
+
+function wallet_tracker_check_transactions()
+{
+    $data = wallet_tracker_get_data();
+    $config = $data['config'];
+
+    $pollInterval = wallet_tracker_sanitize_interval($config['pollInterval']);
+    $now = time();
+    $lastRun = isset($data['lastRun']) ? (int)$data['lastRun'] : 0;
+    if ($lastRun && ($now - $lastRun) < max(30, $pollInterval - 10)) {
+        return;
+    }
+
+    if (empty($data['wallets'])) {
+        $data['lastRun'] = $now;
+        wallet_tracker_save_data($data);
+        return;
+    }
+
+    $newLogs = [];
+    $wallets = $data['wallets'];
+    foreach ($wallets as $index => $wallet) {
+        $result = wallet_tracker_collect_wallet_transactions($wallet, $config);
+        if (!empty($result['logs'])) {
+            $newLogs = array_merge($newLogs, $result['logs']);
+        }
+        $wallets[$index] = $result['wallet'];
+    }
+
+    if (!empty($newLogs)) {
+        usort($newLogs, function ($a, $b) {
+            return ($b['timestamp'] ?? 0) <=> ($a['timestamp'] ?? 0);
+        });
+        $data['logs'] = array_slice(array_merge($newLogs, $data['logs']), 0, 200);
+    }
+
+    $data['wallets'] = $wallets;
+    $data['lastRun'] = $now;
+    wallet_tracker_save_data($data);
+}
+
+function wallet_tracker_collect_wallet_transactions($wallet, $config)
+{
+    $chain = $wallet['chain'];
+    $apiKey = $chain === 'bsc' ? ($config['bscscanKey'] ?? '') : ($config['etherscanKey'] ?? '');
+    if (empty($apiKey)) {
+        return ['wallet' => $wallet, 'logs' => []];
+    }
+
+    $baseUrl = $chain === 'bsc' ? 'https://api.bscscan.com/api' : 'https://api.etherscan.io/api';
+    $address = $wallet['address'];
+
+    $nativeParams = [
+        'module' => 'account',
+        'action' => 'txlist',
+        'address' => $address,
+        'startblock' => max(0, (int)$wallet['lastNativeBlock'] - 1),
+        'endblock' => 99999999,
+        'sort' => 'asc',
+        'apikey' => $apiKey,
+    ];
+
+    $tokenParams = [
+        'module' => 'account',
+        'action' => 'tokentx',
+        'address' => $address,
+        'startblock' => max(0, (int)$wallet['lastTokenBlock'] - 1),
+        'endblock' => 99999999,
+        'sort' => 'asc',
+        'apikey' => $apiKey,
+    ];
+
+    $logs = [];
+    $nativeTransactions = wallet_tracker_fetch_transactions($baseUrl, $nativeParams);
+    if (!empty($nativeTransactions)) {
+        $processed = wallet_tracker_process_transactions($wallet, $nativeTransactions, 'native', $chain, $config);
+        $wallet = $processed['wallet'];
+        $logs = array_merge($logs, $processed['logs']);
+    }
+
+    $tokenTransactions = wallet_tracker_fetch_transactions($baseUrl, $tokenParams);
+    if (!empty($tokenTransactions)) {
+        $processed = wallet_tracker_process_transactions($wallet, $tokenTransactions, 'token', $chain, $config);
+        $wallet = $processed['wallet'];
+        $logs = array_merge($logs, $processed['logs']);
+    }
+
+    return ['wallet' => $wallet, 'logs' => $logs];
+}
+
+function wallet_tracker_fetch_transactions($baseUrl, $params)
+{
+    $url = add_query_arg($params, $baseUrl);
+    $response = wp_remote_get($url, ['timeout' => 20]);
+    if (is_wp_error($response)) {
+        return [];
+    }
+    $body = json_decode(wp_remote_retrieve_body($response), true);
+    if (!is_array($body)) {
+        return [];
+    }
+    if (isset($body['status']) && (string)$body['status'] === '0') {
+        return [];
+    }
+    if (!isset($body['result']) || !is_array($body['result'])) {
+        return [];
+    }
+    return $body['result'];
+}
+
+function wallet_tracker_process_transactions($wallet, $transactions, $type, $chain, $config)
+{
+    $logs = [];
+    $walletAddress = strtolower($wallet['address']);
+    $recentHashes = isset($wallet['recentHashes']) && is_array($wallet['recentHashes']) ? $wallet['recentHashes'] : [];
+    $recentHashes = array_map('strtolower', $recentHashes);
+    $newRecentHashes = $recentHashes;
+    $nativeBlock = isset($wallet['lastNativeBlock']) ? (int)$wallet['lastNativeBlock'] : 0;
+    $tokenBlock = isset($wallet['lastTokenBlock']) ? (int)$wallet['lastTokenBlock'] : 0;
+
+    foreach ($transactions as $transaction) {
+        if (!is_array($transaction) || empty($transaction['hash'])) {
+            continue;
+        }
+        $hash = strtolower($transaction['hash']);
+        if (in_array($hash, $recentHashes, true)) {
+            continue;
+        }
+
+        $blockNumber = isset($transaction['blockNumber']) ? (int)$transaction['blockNumber'] : 0;
+        if ($type === 'native') {
+            if ($blockNumber < $nativeBlock) {
+                continue;
+            }
+        } else {
+            if ($blockNumber < $tokenBlock) {
+                continue;
+            }
+        }
+
+        $timestamp = isset($transaction['timeStamp']) ? (int)$transaction['timeStamp'] : time();
+        $from = strtolower($transaction['from'] ?? '');
+        $to = strtolower($transaction['to'] ?? '');
+        $direction = ($to === $walletAddress) ? 'in' : 'out';
+
+        if ($type === 'native') {
+            $amountRaw = $transaction['value'] ?? '0';
+            $tokenSymbol = $chain === 'bsc' ? 'BNB' : 'ETH';
+            $decimals = 18;
+            $wallet['lastNativeBlock'] = max($blockNumber, $nativeBlock);
+            $nativeBlock = $wallet['lastNativeBlock'];
+        } else {
+            $amountRaw = $transaction['value'] ?? '0';
+            $tokenSymbol = $transaction['tokenSymbol'] ?? '';
+            $decimals = isset($transaction['tokenDecimal']) ? (int)$transaction['tokenDecimal'] : 18;
+            $wallet['lastTokenBlock'] = max($blockNumber, $tokenBlock);
+            $tokenBlock = $wallet['lastTokenBlock'];
+        }
+
+        $amount = wallet_tracker_format_amount($amountRaw, $decimals);
+        $txUrl = $chain === 'bsc' ? 'https://bscscan.com/tx/' . $transaction['hash'] : 'https://etherscan.io/tx/' . $transaction['hash'];
+
+        $log = [
+            'id' => 'log_' . uniqid(),
+            'walletId' => $wallet['id'],
+            'label' => $wallet['label'],
+            'chain' => $chain,
+            'type' => $type,
+            'hash' => $transaction['hash'],
+            'amount' => $amount,
+            'token' => $tokenSymbol,
+            'direction' => $direction,
+            'from' => $transaction['from'] ?? '',
+            'to' => $transaction['to'] ?? '',
+            'timestamp' => $timestamp,
+            'txUrl' => $txUrl,
+        ];
+
+        $log['message'] = wallet_tracker_build_message($wallet, $log);
+
+        $logs[] = $log;
+        $newRecentHashes[] = $hash;
+
+        if (!empty($config['discordWebhook'])) {
+            wallet_tracker_send_discord_message($config['discordWebhook'], $log['message']);
+        }
+    }
+
+    $wallet['recentHashes'] = array_slice(array_map('strtolower', array_unique($newRecentHashes)), -50);
+
+    return ['wallet' => $wallet, 'logs' => $logs];
+}
+
+function wallet_tracker_format_amount($value, $decimals = 18)
+{
+    $value = is_string($value) ? trim($value) : (string)$value;
+    if ($value === '' || !ctype_digit(ltrim($value, '-'))) {
+        return '0';
+    }
+    $isNegative = strpos($value, '-') === 0;
+    if ($isNegative) {
+        $value = substr($value, 1);
+    }
+    $value = ltrim($value, '0');
+    if ($value === '') {
+        $value = '0';
+    }
+
+    if ($decimals <= 0) {
+        return $isNegative ? '-' . $value : $value;
+    }
+
+    if (strlen($value) <= $decimals) {
+        $value = str_pad($value, $decimals + 1, '0', STR_PAD_LEFT);
+    }
+
+    $intPart = substr($value, 0, -$decimals);
+    $fracPart = substr($value, -$decimals);
+    $fracPart = rtrim($fracPart, '0');
+    $formatted = $intPart === '' ? '0' : ltrim($intPart, '0');
+    if ($formatted === '') {
+        $formatted = '0';
+    }
+    if ($fracPart !== '') {
+        $formatted .= '.' . $fracPart;
+    }
+
+    if ($isNegative && $formatted !== '0') {
+        $formatted = '-' . $formatted;
+    }
+
+    return $formatted;
+}
+
+function wallet_tracker_build_message($wallet, $log)
+{
+    $template = !empty($wallet['customText']) ? $wallet['customText'] : 'New {chain} transaction for {label}: {direction} {amount} {token}. Hash: {hash}';
+    $directionText = $log['direction'] === 'in' ? __('received', 'wallet-tracker') : __('sent', 'wallet-tracker');
+    $replacements = [
+        '{label}' => $wallet['label'] ?: $wallet['address'],
+        '{address}' => $wallet['address'],
+        '{chain}' => strtoupper($wallet['chain']),
+        '{direction}' => $directionText,
+        '{amount}' => $log['amount'],
+        '{token}' => $log['token'],
+        '{hash}' => $log['hash'],
+        '{from}' => $log['from'],
+        '{to}' => $log['to'],
+        '{txUrl}' => $log['txUrl'],
+        '{type}' => $log['type'],
+    ];
+    return strtr($template, $replacements);
+}
+
+function wallet_tracker_send_discord_message($webhookUrl, $message)
+{
+    if (empty($webhookUrl) || empty($message)) {
+        return;
+    }
+
+    $payload = [
+        'content' => $message,
+    ];
+
+    wp_remote_post($webhookUrl, [
+        'timeout' => 5,
+        'blocking' => false,
+        'headers' => ['Content-Type' => 'application/json'],
+        'body' => wp_json_encode($payload),
+    ]);
+}
