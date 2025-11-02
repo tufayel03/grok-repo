@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Multi-Chain Wallet Monitor
  * Description: Track ETH, BSC, and SOL wallets, log transactions, and send Discord alerts from a front-end control panel.
- * Version: 1.3.1
+ * Version: 1.4.0
  * Author: Grok AI
  */
 
@@ -20,7 +20,7 @@ class MCWT_MultiChain_Wallet_Monitor {
     const CRON_HOOK = 'mcwt_poll_transactions';
     const CRON_SCHEDULE = 'mcwt_custom_interval';
     const DEFAULT_INTERVAL = 5; // minutes
-    const USER_AGENT = 'MCWT-Wallet-Monitor/1.3.1';
+    const USER_AGENT = 'MCWT-Wallet-Monitor/1.4.0';
 
     public function __construct() {
         register_activation_hook(__FILE__, [__CLASS__, 'activate']);
@@ -432,21 +432,25 @@ class MCWT_MultiChain_Wallet_Monitor {
             .mcwt-wallet-table .mcwt-table { border-radius: 10px; overflow: hidden; box-shadow: 0 10px 24px rgba(15,23,42,.06); }
             .mcwt-table thead { background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; }
             .mcwt-table th { font-weight: 600; padding: .85rem; }
-            .mcwt-table td { padding: .85rem; background: #fff; vertical-align: top; }
+            .mcwt-table td { padding: .85rem; background: #fff; vertical-align: top; transition: background .2s ease; }
             .mcwt-table tr:nth-child(odd) td { background: #f5f7ff; }
+            .mcwt-table tbody tr:hover td { background: #e8edff; }
             .mcwt-wallet-actions { display: flex; flex-wrap: wrap; gap: 1rem; align-items: stretch; }
             .mcwt-wallet-actions form { margin: 0; flex: 1 1 260px; background: #f8fafc; border: 1px solid #e2e8f0; padding: .75rem; border-radius: 8px; }
             .mcwt-update-wallet textarea { resize: vertical; min-height: 80px; }
             .mcwt-wallet-actions .button-small { margin-top: .5rem; }
             .mcwt-control-panel .button.button-primary { background: linear-gradient(135deg, #2563eb, #7c3aed); border: none; box-shadow: 0 8px 16px rgba(37,99,235,.25); transition: transform .15s ease, box-shadow .15s ease; }
             .mcwt-control-panel .button.button-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 22px rgba(37,99,235,.28); }
-            .mcwt-control-panel .button.button-secondary { background: #e2e8f0; border: none; color: #1f2937; }
+            .mcwt-control-panel .button.button-secondary { background: #e2e8f0; border: none; color: #1f2937; transition: background .15s ease, color .15s ease; }
             .mcwt-control-panel .button.button-secondary:hover { background: #cbd5f5; color: #111827; }
             .mcwt-control-panel .button.button-small { background: #0f172a; color: #fff; border: none; }
             .mcwt-control-panel .button.button-small:hover { background: #1e293b; }
             .mcwt-wallet-actions .description, .mcwt-add-wallet .description { display: block; font-size: 12px; color: #666; margin-top: .3rem; }
             .mcwt-pagination { margin-top: 1.25rem; display: flex; gap: .5rem; }
             .mcwt-pagination .button { text-decoration: none; border-radius: 999px; padding: .4rem 1rem; }
+            .mcwt-control-panel input:focus,
+            .mcwt-control-panel textarea:focus,
+            .mcwt-control-panel select:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.25); }
             .mcwt-chain { display: inline-block; padding: .2rem .6rem; border-radius: 999px; font-size: .75rem; letter-spacing: .05em; text-transform: uppercase; background: #e2e8f0; color: #1f2937; font-weight: 600; }
             .mcwt-chain-eth { background: #efe7ff; color: #5b21b6; }
             .mcwt-chain-bsc { background: #fff7d6; color: #ad6800; }
@@ -511,9 +515,11 @@ class MCWT_MultiChain_Wallet_Monitor {
             .mcwt-transaction-log .mcwt-table { border-radius: 10px; overflow: hidden; box-shadow: 0 10px 24px rgba(15,23,42,.06); }
             .mcwt-transaction-log .mcwt-table thead { background: linear-gradient(135deg, #6366f1, #4338ca); color: #fff; }
             .mcwt-transaction-log .mcwt-table th { padding: .85rem; }
-            .mcwt-transaction-log .mcwt-table td { padding: .85rem; background: #fff; }
+            .mcwt-transaction-log .mcwt-table td { padding: .85rem; background: #fff; transition: background .2s ease; }
             .mcwt-transaction-log .mcwt-table tr:nth-child(odd) td { background: #f5f7ff; }
+            .mcwt-transaction-log .mcwt-table tbody tr:hover td { background: #eef2ff; }
             .mcwt-transaction-log a { color: #2563eb; font-weight: 500; }
+            .mcwt-transaction-log a:hover { color: #1d4ed8; }
             @media (max-width: 782px) {
                 .mcwt-log-surface { padding: 2rem 1rem; }
                 .mcwt-transaction-log { padding: 1.25rem; border-radius: 10px; }
@@ -796,61 +802,34 @@ class MCWT_MultiChain_Wallet_Monitor {
     }
 
     private function query_etherscan_family($service, $address, $api_key) {
-        $base_url = 'etherscan' === $service ? 'https://api.etherscan.io' : 'https://api.bscscan.com';
         $chain = 'etherscan' === $service ? 'eth' : 'bsc';
+        $response = $this->perform_etherscan_call($service, $address, $api_key, $chain);
 
-        $v2 = $this->perform_etherscan_call($base_url, $address, $api_key, $chain, true);
-        if (isset($v2['success']) && $v2['success']) {
+        if (isset($response['success']) && $response['success']) {
             $this->clear_api_error($service);
-            return $v2['transaction'];
+            return $response['transaction'];
         }
-        if (isset($v2['no_tx']) && $v2['no_tx']) {
+
+        if (isset($response['no_tx']) && $response['no_tx']) {
             $this->clear_api_error($service);
             return null;
         }
 
-        $legacy = $this->perform_etherscan_call($base_url, $address, $api_key, $chain, false);
-        if (isset($legacy['success']) && $legacy['success']) {
-            $this->clear_api_error($service);
-            return $legacy['transaction'];
-        }
-        if (isset($legacy['no_tx']) && $legacy['no_tx']) {
-            $this->clear_api_error($service);
-            return null;
-        }
-
-        $error = isset($legacy['error']) ? $legacy['error'] : (isset($v2['error']) ? $v2['error'] : __('Unknown explorer error', 'mcwt'));
+        $error = isset($response['error']) ? $response['error'] : __('Unknown explorer error', 'mcwt');
         $this->record_api_error($service, $error);
         return null;
     }
 
-    private function perform_etherscan_call($base_url, $address, $api_key, $chain, $use_v2 = false) {
-        $endpoint = $use_v2
-            ? trailingslashit($base_url) . 'v2/api'
-            : trailingslashit($base_url) . 'api';
-
-        if ($use_v2) {
-            $query = [
-                'chainid' => ('bsc' === $chain) ? 56 : 1,
-                'module' => 'account',
-                'action' => 'txlist',
-                'address' => $address,
-                'page' => 1,
-                'offset' => 1,
-                'sort' => 'desc',
-            ];
-        } else {
-            $query = [
-                'module' => 'account',
-                'action' => 'txlist',
-                'address' => $address,
-                'startblock' => 0,
-                'endblock' => 99999999,
-                'page' => 1,
-                'offset' => 1,
-                'sort' => 'desc',
-            ];
-        }
+    private function perform_etherscan_call($service, $address, $api_key, $chain) {
+        $base_url = 'etherscan' === $service ? 'https://api.etherscan.io/v2/api' : 'https://api.bscscan.com/v2/api';
+        $query = [
+            'chainid' => ('bsc' === $chain) ? 56 : 1,
+            'action' => 'txlist',
+            'address' => $address,
+            'page' => 1,
+            'offset' => 1,
+            'sort' => 'desc',
+        ];
 
         $headers = [
             'User-Agent' => self::USER_AGENT,
@@ -858,13 +837,9 @@ class MCWT_MultiChain_Wallet_Monitor {
         ];
 
         if (!empty($api_key)) {
-            if ($use_v2) {
-                $headers['X-API-Key'] = $api_key;
-                $headers['x-apikey'] = $api_key;
-                $query['apikey'] = $api_key;
-            } else {
-                $query['apikey'] = $api_key;
-            }
+            $headers['X-API-Key'] = $api_key;
+            $headers['x-apikey'] = $api_key;
+            $query['apikey'] = $api_key;
         }
 
         $args = [
@@ -872,7 +847,7 @@ class MCWT_MultiChain_Wallet_Monitor {
             'headers' => $headers,
         ];
 
-        $url = add_query_arg($query, $endpoint);
+        $url = add_query_arg($query, $base_url);
         $response = wp_remote_get($url, $args);
 
         if (is_wp_error($response)) {
@@ -887,6 +862,32 @@ class MCWT_MultiChain_Wallet_Monitor {
         $body = json_decode(wp_remote_retrieve_body($response), true);
         if (!is_array($body)) {
             return ['error' => __('Invalid explorer response.', 'mcwt')];
+        }
+
+        if (isset($body['error']) && is_string($body['error']) && '' !== trim($body['error'])) {
+            return ['error' => $body['error']];
+        }
+
+        if (isset($body['message']) && is_string($body['message']) && !isset($body['result']) && !isset($body['data'])) {
+            if (false !== stripos($body['message'], 'No transactions')) {
+                return ['no_tx' => true];
+            }
+            return ['error' => $body['message']];
+        }
+
+        if (isset($body['message']) && is_string($body['message']) && isset($body['status']) && (string) $body['status'] === '0') {
+            if (false !== stripos($body['message'], 'No transactions')) {
+                return ['no_tx' => true];
+            }
+            return ['error' => $body['message']];
+        }
+
+        if (isset($body['code']) && (int) $body['code'] !== 0) {
+            $message = isset($body['message']) && is_string($body['message']) ? $body['message'] : __('Explorer returned an unknown error.', 'mcwt');
+            if (false !== stripos($message, 'No transactions')) {
+                return ['no_tx' => true];
+            }
+            return ['error' => $message];
         }
 
         if (isset($body['status']) && (string) $body['status'] === '0') {
@@ -925,8 +926,17 @@ class MCWT_MultiChain_Wallet_Monitor {
         if (isset($body['data']['transactions']) && is_array($body['data']['transactions'])) {
             return $body['data']['transactions'];
         }
+        if (isset($body['data']['items']) && is_array($body['data']['items'])) {
+            return $body['data']['items'];
+        }
         if (isset($body['transactions']) && is_array($body['transactions'])) {
             return $body['transactions'];
+        }
+        if (isset($body['items']) && is_array($body['items'])) {
+            return $body['items'];
+        }
+        if (isset($body['result']['records']) && is_array($body['result']['records'])) {
+            return $body['result']['records'];
         }
 
         return [];
