@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Multi-Chain Wallet Monitor
  * Description: Track ETH, BSC, and SOL wallets, log transactions, and send Discord alerts from a front-end control panel.
- * Version: 1.4.0
+ * Version: 1.5.0
  * Author: Grok AI
  */
 
@@ -20,7 +20,7 @@ class MCWT_MultiChain_Wallet_Monitor {
     const CRON_HOOK = 'mcwt_poll_transactions';
     const CRON_SCHEDULE = 'mcwt_custom_interval';
     const DEFAULT_INTERVAL = 5; // minutes
-    const USER_AGENT = 'MCWT-Wallet-Monitor/1.4.0';
+    const USER_AGENT = 'MCWT-Wallet-Monitor/1.5.0';
 
     public function __construct() {
         register_activation_hook(__FILE__, [__CLASS__, 'activate']);
@@ -36,9 +36,11 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         add_action('admin_post_mcwt_add_wallet', [$this, 'handle_add_wallet']);
         add_action('admin_post_mcwt_delete_wallet', [$this, 'handle_delete_wallet']);
+        add_action('admin_post_mcwt_bulk_delete_wallets', [$this, 'handle_bulk_delete_wallets']);
         add_action('admin_post_mcwt_update_wallet', [$this, 'handle_update_wallet']);
         add_action('admin_post_mcwt_update_keys', [$this, 'handle_update_keys']);
         add_action('admin_post_mcwt_update_message', [$this, 'handle_update_message']);
+        add_action('admin_post_mcwt_clear_log', [$this, 'handle_clear_log']);
     }
 
     public static function activate() {
@@ -236,45 +238,54 @@ class MCWT_MultiChain_Wallet_Monitor {
 
             <section class="mcwt-add-wallet">
                 <h3><?php esc_html_e('Add Wallet', 'mcwt'); ?></h3>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="mcwt-inline-form">
                     <?php wp_nonce_field('mcwt_add_wallet'); ?>
                     <input type="hidden" name="action" value="mcwt_add_wallet" />
-                    <p>
-                        <label><?php esc_html_e('Label', 'mcwt'); ?><br />
-                            <input type="text" name="mcwt_label" required />
-                        </label>
-                    </p>
-                    <p>
-                        <label><?php esc_html_e('Wallet Address', 'mcwt'); ?><br />
-                            <input type="text" name="mcwt_address" required />
-                        </label>
-                    </p>
-                    <p>
-                        <label><?php esc_html_e('Chain', 'mcwt'); ?><br />
-                            <select name="mcwt_chain">
-                                <option value="eth"><?php esc_html_e('Ethereum', 'mcwt'); ?></option>
-                                <option value="bsc"><?php esc_html_e('BSC', 'mcwt'); ?></option>
-                                <option value="sol"><?php esc_html_e('Solana', 'mcwt'); ?></option>
-                            </select>
-                        </label>
-                    </p>
-                    <p>
-                        <label><?php esc_html_e('Custom Discord Message', 'mcwt'); ?><br />
-                            <textarea name="mcwt_message" rows="2" placeholder="<?php echo esc_attr__('Leave empty to use the default template.', 'mcwt'); ?>"></textarea>
-                        </label>
-                        <span class="description"><?php esc_html_e('Available tags: {label}, {address}, {hash}, {chain}, {amount}. Leave blank to use the default template.', 'mcwt'); ?></span>
-                    </p>
-                    <p>
-                        <button type="submit" class="button button-primary"><?php esc_html_e('Add Wallet', 'mcwt'); ?></button>
-                    </p>
+                    <div class="mcwt-inline-fields">
+                        <div class="mcwt-field">
+                            <label><?php esc_html_e('Label', 'mcwt'); ?>
+                                <input type="text" name="mcwt_label" required />
+                            </label>
+                        </div>
+                        <div class="mcwt-field">
+                            <label><?php esc_html_e('Wallet Address', 'mcwt'); ?>
+                                <input type="text" name="mcwt_address" required />
+                            </label>
+                        </div>
+                        <div class="mcwt-field mcwt-field-chain">
+                            <label><?php esc_html_e('Chain', 'mcwt'); ?>
+                                <select name="mcwt_chain">
+                                    <option value="eth"><?php esc_html_e('Ethereum', 'mcwt'); ?></option>
+                                    <option value="bsc"><?php esc_html_e('BSC', 'mcwt'); ?></option>
+                                    <option value="sol"><?php esc_html_e('Solana', 'mcwt'); ?></option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="mcwt-field mcwt-field-message">
+                            <label><?php esc_html_e('Custom Discord Message', 'mcwt'); ?>
+                                <textarea name="mcwt_message" rows="1" placeholder="<?php echo esc_attr__('Leave empty to use the default template.', 'mcwt'); ?>"></textarea>
+                            </label>
+                            <span class="description"><?php esc_html_e('Tags: {label}, {address}, {hash}, {chain}, {amount}. Leave blank to use the default template.', 'mcwt'); ?></span>
+                        </div>
+                        <div class="mcwt-field mcwt-field-submit">
+                            <button type="submit" class="button button-primary"><?php esc_html_e('Add Wallet', 'mcwt'); ?></button>
+                        </div>
+                    </div>
                 </form>
             </section>
 
-            <section class="mcwt-search">
-                <h3><?php esc_html_e('Search Wallets', 'mcwt'); ?></h3>
-                <form method="get">
-                    <input type="text" name="mcwt_search" value="<?php echo esc_attr($search); ?>" placeholder="<?php esc_attr_e('Search by label', 'mcwt'); ?>" />
+            <section class="mcwt-table-toolbar">
+                <form method="get" class="mcwt-search">
+                    <label class="screen-reader-text" for="mcwt_search_field"><?php esc_html_e('Search wallets', 'mcwt'); ?></label>
+                    <input id="mcwt_search_field" type="text" name="mcwt_search" value="<?php echo esc_attr($search); ?>" placeholder="<?php esc_attr_e('Search by label…', 'mcwt'); ?>" />
                     <button type="submit" class="button"><?php esc_html_e('Search', 'mcwt'); ?></button>
+                </form>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="mcwt-bulk-delete" class="mcwt-bulk-form" onsubmit="return confirm('<?php echo esc_js(__('Remove selected wallets?', 'mcwt')); ?>');">
+                    <?php wp_nonce_field('mcwt_bulk_delete_wallets'); ?>
+                    <input type="hidden" name="action" value="mcwt_bulk_delete_wallets" />
+                    <button type="submit" class="button button-secondary mcwt-bulk-remove" disabled>
+                        <?php esc_html_e('Remove Selected', 'mcwt'); ?>
+                    </button>
                 </form>
             </section>
 
@@ -283,6 +294,7 @@ class MCWT_MultiChain_Wallet_Monitor {
                 <table class="mcwt-table widefat">
                     <thead>
                         <tr>
+                            <th class="mcwt-select-cell"><input type="checkbox" id="mcwt-select-all" /></th>
                             <th><?php esc_html_e('Label', 'mcwt'); ?></th>
                             <th><?php esc_html_e('Address', 'mcwt'); ?></th>
                             <th><?php esc_html_e('Chain', 'mcwt'); ?></th>
@@ -293,14 +305,19 @@ class MCWT_MultiChain_Wallet_Monitor {
                     <tbody>
                     <?php if (empty($display_wallets)) : ?>
                         <tr>
-                            <td colspan="5"><?php esc_html_e('No wallets found.', 'mcwt'); ?></td>
+                            <td colspan="6"><?php esc_html_e('No wallets found.', 'mcwt'); ?></td>
                         </tr>
                     <?php else :
                         foreach ($display_wallets as $wallet) :
+                            $selection_id = 'mcwt-select-' . substr(md5($wallet['address'] . $wallet['chain']), 0, 8);
                             $wallet_message = isset($wallet['message']) ? $wallet['message'] : '';
                             $message_preview = $wallet_message ? wp_trim_words($wallet_message, 16, '&hellip;') : wp_trim_words($default_message, 16, '&hellip;');
                             ?>
                             <tr>
+                                <td class="mcwt-select-cell">
+                                    <label class="screen-reader-text" for="<?php echo esc_attr($selection_id); ?>"><?php printf(esc_html__('Select %s', 'mcwt'), esc_html($wallet['label'])); ?></label>
+                                    <input type="checkbox" id="<?php echo esc_attr($selection_id); ?>" class="mcwt-wallet-select" name="mcwt_wallets[]" form="mcwt-bulk-delete" value="<?php echo esc_attr($wallet['address'] . '|' . $wallet['chain']); ?>" />
+                                </td>
                                 <td><?php echo esc_html($wallet['label']); ?></td>
                                 <td><code><?php echo esc_html($wallet['address']); ?></code></td>
                                 <td><span class="mcwt-chain mcwt-chain-<?php echo esc_attr($wallet['chain']); ?>"><?php echo esc_html(strtoupper($wallet['chain'])); ?></span></td>
@@ -404,64 +421,131 @@ class MCWT_MultiChain_Wallet_Monitor {
         </div>
         </div>
         <style>
-            .mcwt-surface { padding: 3rem 1rem; background: linear-gradient(135deg, #eef2ff, #f8fafc); }
-            .mcwt-control-panel { max-width: 1040px; margin: 2rem auto; background: #fff; padding: 2rem; border-radius: 12px; box-shadow: 0 15px 30px rgba(0,0,0,.08); }
-            .mcwt-control-panel h2 { margin-bottom: 1.5rem; font-size: 1.8rem; }
+            .mcwt-surface { padding: clamp(1.5rem, 4vw, 3rem) clamp(1rem, 3vw, 2.5rem); background: radial-gradient(circle at top left, #eff6ff 0%, #e0e7ff 35%, #f8fafc 100%); min-height: 100%; }
+            .mcwt-control-panel { width: min(1200px, 100%); margin: 0 auto; background: rgba(255, 255, 255, 0.94); border-radius: 16px; padding: clamp(1.5rem, 3vw, 2.4rem); box-shadow: 0 24px 60px rgba(15,23,42,.12); border: 1px solid rgba(148,163,184,.18); backdrop-filter: blur(6px); }
+            .mcwt-control-panel h2 { margin-bottom: 1.25rem; font-size: 1.85rem; letter-spacing: -0.01em; }
             .mcwt-control-panel section { margin-bottom: 2rem; }
-            .mcwt-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2.5rem; }
-            .mcwt-card { background: #f7f9fc; border-radius: 10px; padding: 1rem 1.25rem; border: 1px solid #e4e9f2; box-shadow: inset 0 1px 0 rgba(255,255,255,.6); }
-            .mcwt-card h3 { margin: 0 0 .5rem; font-size: .95rem; text-transform: uppercase; letter-spacing: .04em; color: #52606d; }
-            .mcwt-card p { margin: 0; font-size: 1.1rem; font-weight: 600; color: #1f2933; }
-            .mcwt-errors { border: 1px solid #f59f00; background: #fff7e6; border-radius: 8px; padding: 1rem 1.25rem; }
-            .mcwt-errors h3 { margin-top: 0; color: #ad6800; }
+            .mcwt-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2.25rem; }
+            .mcwt-card { background: linear-gradient(135deg, rgba(37,99,235,.08), rgba(59,130,246,.18)); border-radius: 14px; padding: 1.1rem 1.35rem; border: 1px solid rgba(96,165,250,.35); color: #0f172a; box-shadow: inset 0 1px 0 rgba(255,255,255,.6); }
+            .mcwt-card h3 { margin: 0 0 .4rem; font-size: .9rem; text-transform: uppercase; letter-spacing: .08em; color: rgba(15,23,42,.65); }
+            .mcwt-card p { margin: 0; font-size: 1.15rem; font-weight: 600; }
+            .mcwt-errors { border-radius: 12px; padding: 1.1rem 1.35rem; background: linear-gradient(135deg, rgba(252,211,77,.18), rgba(245,158,11,.14)); border: 1px solid rgba(217,119,6,.35); }
+            .mcwt-errors h3 { margin-top: 0; color: #92400e; }
             .mcwt-errors ul { margin: 0; padding-left: 1.2rem; }
-            .mcwt-errors li { margin-bottom: .5rem; font-size: .95rem; }
-            .mcwt-error-time { display: inline-block; margin-left: .5rem; color: #5f6b7a; font-size: .85rem; }
-            .mcwt-add-wallet form, .mcwt-api-keys form { background: #f9fbff; border: 1px solid #e5edff; padding: 1.5rem; border-radius: 10px; box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
-            .mcwt-add-wallet input[type="text"],
-            .mcwt-add-wallet textarea,
-            .mcwt-add-wallet select,
+            .mcwt-errors li { margin-bottom: .45rem; font-size: .95rem; color: #78350f; }
+            .mcwt-error-time { display: inline-block; margin-left: .5rem; color: #4b5563; font-size: .85rem; }
+            .mcwt-inline-form { background: rgba(30, 64, 175, 0.05); border: 1px solid rgba(79,70,229,.2); border-radius: 14px; padding: 1.25rem 1.5rem; box-shadow: inset 0 1px 0 rgba(255,255,255,.65); }
+            .mcwt-inline-fields { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.4fr) minmax(120px, .8fr) minmax(220px, 1.6fr) minmax(140px, .7fr); gap: 1rem; align-items: end; }
+            .mcwt-field label { display: flex; flex-direction: column; gap: .35rem; font-weight: 600; color: #1e293b; font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; }
+            .mcwt-field textarea,
+            .mcwt-field input,
+            .mcwt-field select,
             .mcwt-update-wallet input[type="text"],
             .mcwt-update-wallet textarea,
-            .mcwt-search input[type="text"],
+            .mcwt-search input,
             .mcwt-api-keys input,
-            .mcwt-api-keys textarea { width: 100%; max-width: 100%; border-radius: 6px; border: 1px solid #cbd5f5; padding: .55rem .65rem; box-shadow: inset 0 1px 2px rgba(14,30,37,.1); }
-            .mcwt-search { display: flex; align-items: flex-end; gap: .75rem; }
-            .mcwt-search form { display: flex; gap: .5rem; width: 100%; }
-            .mcwt-search button.button { padding: .55rem 1rem; }
-            .mcwt-wallet-table .mcwt-table { border-radius: 10px; overflow: hidden; box-shadow: 0 10px 24px rgba(15,23,42,.06); }
-            .mcwt-table thead { background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; }
-            .mcwt-table th { font-weight: 600; padding: .85rem; }
-            .mcwt-table td { padding: .85rem; background: #fff; vertical-align: top; transition: background .2s ease; }
-            .mcwt-table tr:nth-child(odd) td { background: #f5f7ff; }
-            .mcwt-table tbody tr:hover td { background: #e8edff; }
-            .mcwt-wallet-actions { display: flex; flex-wrap: wrap; gap: 1rem; align-items: stretch; }
-            .mcwt-wallet-actions form { margin: 0; flex: 1 1 260px; background: #f8fafc; border: 1px solid #e2e8f0; padding: .75rem; border-radius: 8px; }
-            .mcwt-update-wallet textarea { resize: vertical; min-height: 80px; }
-            .mcwt-wallet-actions .button-small { margin-top: .5rem; }
-            .mcwt-control-panel .button.button-primary { background: linear-gradient(135deg, #2563eb, #7c3aed); border: none; box-shadow: 0 8px 16px rgba(37,99,235,.25); transition: transform .15s ease, box-shadow .15s ease; }
-            .mcwt-control-panel .button.button-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 22px rgba(37,99,235,.28); }
-            .mcwt-control-panel .button.button-secondary { background: #e2e8f0; border: none; color: #1f2937; transition: background .15s ease, color .15s ease; }
-            .mcwt-control-panel .button.button-secondary:hover { background: #cbd5f5; color: #111827; }
-            .mcwt-control-panel .button.button-small { background: #0f172a; color: #fff; border: none; }
-            .mcwt-control-panel .button.button-small:hover { background: #1e293b; }
-            .mcwt-wallet-actions .description, .mcwt-add-wallet .description { display: block; font-size: 12px; color: #666; margin-top: .3rem; }
-            .mcwt-pagination { margin-top: 1.25rem; display: flex; gap: .5rem; }
-            .mcwt-pagination .button { text-decoration: none; border-radius: 999px; padding: .4rem 1rem; }
+            .mcwt-api-keys textarea { width: 100%; border-radius: 8px; border: 1px solid rgba(99,102,241,.25); padding: .6rem .75rem; box-shadow: inset 0 1px 2px rgba(15,23,42,.08); background: rgba(255,255,255,.92); transition: border-color .2s ease, box-shadow .2s ease; }
+            .mcwt-field textarea { min-height: 44px; resize: vertical; }
+            .mcwt-field-message .description { display: block; margin-top: .4rem; font-size: .75rem; color: #475569; text-transform: none; letter-spacing: normal; font-weight: 500; }
+            .mcwt-field-submit { display: flex; align-items: flex-end; justify-content: flex-end; }
+            .mcwt-table-toolbar { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; background: rgba(255,255,255,.6); border: 1px solid rgba(148,163,184,.25); border-radius: 14px; padding: 1rem 1.25rem; box-shadow: inset 0 1px 0 rgba(255,255,255,.5); }
+            .mcwt-search { display: flex; gap: .75rem; align-items: center; flex: 1 1 320px; }
+            .mcwt-search input { flex: 1; }
+            .mcwt-search .button { padding: .65rem 1.1rem; border-radius: 999px; background: linear-gradient(135deg, #4f46e5, #6366f1); border: none; color: #fff; box-shadow: 0 10px 22px rgba(79,70,229,.25); }
+            .mcwt-search .button:hover { transform: translateY(-1px); box-shadow: 0 14px 28px rgba(79,70,229,.28); }
+            .mcwt-bulk-form { display: flex; justify-content: flex-end; gap: .75rem; }
+            .mcwt-bulk-remove { padding: .6rem 1.35rem; border-radius: 999px; border: none; background: linear-gradient(135deg, #f87171, #ef4444); color: #fff; font-weight: 600; box-shadow: 0 12px 26px rgba(239,68,68,.24); transition: transform .2s ease, box-shadow .2s ease, opacity .2s ease; }
+            .mcwt-bulk-remove:hover:not(.mcwt-disabled) { transform: translateY(-1px); box-shadow: 0 16px 32px rgba(239,68,68,.28); }
+            .mcwt-bulk-remove.mcwt-disabled { opacity: .4; cursor: not-allowed; box-shadow: none; }
+            .mcwt-wallet-table .mcwt-table { border-radius: 14px; overflow: hidden; box-shadow: 0 18px 44px rgba(15,23,42,.08); }
+            .mcwt-table thead { background: linear-gradient(135deg, #312e81, #1d4ed8); color: #fff; }
+            .mcwt-table th { font-weight: 600; padding: .9rem; text-align: left; }
+            .mcwt-table td { padding: .9rem; background: rgba(255,255,255,.95); vertical-align: top; transition: background .2s ease; }
+            .mcwt-table tr:nth-child(odd) td { background: rgba(226,232,240,.55); }
+            .mcwt-table tbody tr:hover td { background: rgba(191,219,254,.55); }
+            .mcwt-select-cell { width: 48px; text-align: center; }
+            .mcwt-select-cell input[type="checkbox"] { width: 18px; height: 18px; accent-color: #4f46e5; }
+            .mcwt-wallet-actions { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+            .mcwt-wallet-actions form { margin: 0; background: rgba(248,250,252,.9); border: 1px solid rgba(203,213,225,.7); padding: .9rem; border-radius: 12px; box-shadow: inset 0 1px 0 rgba(255,255,255,.6); }
+            .mcwt-update-wallet textarea { resize: vertical; min-height: 76px; }
+            .mcwt-wallet-actions .button-small { margin-top: .5rem; border-radius: 999px; padding: .5rem 1.05rem; }
+            .mcwt-control-panel .button.button-primary { background: linear-gradient(135deg, #2563eb, #7c3aed); border: none; box-shadow: 0 14px 30px rgba(91,33,182,.25); transition: transform .18s ease, box-shadow .18s ease; }
+            .mcwt-control-panel .button.button-primary:hover { transform: translateY(-1px); box-shadow: 0 18px 40px rgba(91,33,182,.28); }
+            .mcwt-control-panel .button.button-secondary { background: linear-gradient(135deg, #e2e8f0, #cbd5f5); border: none; color: #111827; transition: transform .15s ease, box-shadow .15s ease; }
+            .mcwt-control-panel .button.button-secondary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(148,163,184,.35); }
+            .mcwt-control-panel .button.button-small { background: linear-gradient(135deg, #0f172a, #1e293b); color: #fff; border: none; }
+            .mcwt-control-panel .button.button-small:hover { transform: translateY(-1px); box-shadow: 0 10px 20px rgba(15,23,42,.35); }
+            .mcwt-wallet-actions .description { display: block; font-size: .75rem; color: #475569; margin-top: .35rem; }
+            .mcwt-pagination { margin-top: 1.5rem; display: flex; gap: .65rem; }
+            .mcwt-pagination .button { text-decoration: none; border-radius: 999px; padding: .45rem 1.1rem; box-shadow: 0 12px 26px rgba(59,130,246,.18); }
             .mcwt-control-panel input:focus,
             .mcwt-control-panel textarea:focus,
-            .mcwt-control-panel select:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.25); }
-            .mcwt-chain { display: inline-block; padding: .2rem .6rem; border-radius: 999px; font-size: .75rem; letter-spacing: .05em; text-transform: uppercase; background: #e2e8f0; color: #1f2937; font-weight: 600; }
-            .mcwt-chain-eth { background: #efe7ff; color: #5b21b6; }
-            .mcwt-chain-bsc { background: #fff7d6; color: #ad6800; }
-            .mcwt-chain-sol { background: #e0f2fe; color: #0c4a6e; }
+            .mcwt-control-panel select:focus { outline: none; border-color: rgba(79,70,229,.6); box-shadow: 0 0 0 3px rgba(99,102,241,.25); }
+            .mcwt-chain { display: inline-block; padding: .25rem .65rem; border-radius: 999px; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; }
+            .mcwt-chain-eth { background: rgba(196,181,253,.35); color: #4c1d95; }
+            .mcwt-chain-bsc { background: rgba(254,240,138,.5); color: #92400e; }
+            .mcwt-chain-sol { background: rgba(165,243,252,.45); color: #0f766e; }
             .mcwt-notices .notice { margin: 0 0 1rem; }
+            @media (max-width: 1180px) {
+                .mcwt-inline-fields { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+                .mcwt-field-submit { justify-content: stretch; }
+            }
+            @media (max-width: 900px) {
+                .mcwt-table-toolbar { flex-direction: column; align-items: stretch; }
+                .mcwt-bulk-form { justify-content: flex-start; }
+                .mcwt-inline-fields { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+            }
             @media (max-width: 782px) {
-                .mcwt-surface { padding: 2rem 1rem; }
-                .mcwt-control-panel { padding: 1.25rem; border-radius: 10px; }
-                .mcwt-wallet-actions { flex-direction: column; }
+                .mcwt-surface { padding: 1.75rem 1rem; }
+                .mcwt-control-panel { padding: 1.25rem; border-radius: 14px; }
+                .mcwt-wallet-actions { grid-template-columns: 1fr; }
             }
         </style>
+        <script>
+            (function() {
+                const bulkForm = document.getElementById('mcwt-bulk-delete');
+                if (!bulkForm) {
+                    return;
+                }
+                const selectAll = document.getElementById('mcwt-select-all');
+                const checkboxes = Array.prototype.slice.call(document.querySelectorAll('.mcwt-wallet-select'));
+                const bulkButton = bulkForm.querySelector('.mcwt-bulk-remove');
+
+                const syncState = function() {
+                    const anyChecked = checkboxes.some(function(cb) { return cb.checked; });
+                    if (bulkButton) {
+                        bulkButton.disabled = !anyChecked;
+                        bulkButton.classList.toggle('mcwt-disabled', !anyChecked);
+                    }
+                    if (selectAll) {
+                        if (!checkboxes.length) {
+                            selectAll.indeterminate = false;
+                            selectAll.checked = false;
+                            return;
+                        }
+                        const allChecked = checkboxes.every(function(cb) { return cb.checked; });
+                        selectAll.checked = allChecked;
+                        selectAll.indeterminate = !allChecked && anyChecked;
+                    }
+                };
+
+                checkboxes.forEach(function(cb) {
+                    cb.addEventListener('change', syncState);
+                });
+
+                if (selectAll) {
+                    selectAll.addEventListener('change', function() {
+                        const checked = selectAll.checked;
+                        checkboxes.forEach(function(cb) {
+                            cb.checked = checked;
+                        });
+                        syncState();
+                    });
+                }
+
+                syncState();
+            })();
+        </script>
         <?php
         return ob_get_clean();
     }
@@ -472,12 +556,29 @@ class MCWT_MultiChain_Wallet_Monitor {
         }
 
         $log = get_option(self::OPTION_LOG, []);
+        if (!is_array($log)) {
+            $log = [];
+        }
+        if (count($log) > 100) {
+            $log = array_slice($log, 0, 100);
+            update_option(self::OPTION_LOG, $log);
+        }
 
         ob_start();
         ?>
         <div class="mcwt-log-surface">
         <div class="mcwt-transaction-log">
-            <h2><?php esc_html_e('Latest Transactions', 'mcwt'); ?></h2>
+            <div class="mcwt-log-header">
+                <h2><?php esc_html_e('Latest Transactions', 'mcwt'); ?></h2>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="mcwt-clear-log" onsubmit="return confirm('<?php echo esc_js(__('Clear the transaction log?', 'mcwt')); ?>');">
+                    <?php wp_nonce_field('mcwt_clear_log'); ?>
+                    <input type="hidden" name="action" value="mcwt_clear_log" />
+                    <button type="submit" class="button button-secondary">
+                        <?php esc_html_e('Clear Log', 'mcwt'); ?>
+                    </button>
+                </form>
+            </div>
+            <?php $this->render_notices(); ?>
             <table class="widefat mcwt-table">
                 <thead>
                     <tr>
@@ -509,20 +610,25 @@ class MCWT_MultiChain_Wallet_Monitor {
         </div>
         </div>
         <style>
-            .mcwt-log-surface { padding: 3rem 1rem; background: linear-gradient(160deg, #f1f5f9, #fdf2f8); }
-            .mcwt-transaction-log { max-width: 1040px; margin: 2rem auto; background: #fff; padding: 2rem; border-radius: 12px; box-shadow: 0 15px 30px rgba(0,0,0,.08); }
-            .mcwt-transaction-log h2 { margin-bottom: 1.5rem; font-size: 1.8rem; }
-            .mcwt-transaction-log .mcwt-table { border-radius: 10px; overflow: hidden; box-shadow: 0 10px 24px rgba(15,23,42,.06); }
-            .mcwt-transaction-log .mcwt-table thead { background: linear-gradient(135deg, #6366f1, #4338ca); color: #fff; }
-            .mcwt-transaction-log .mcwt-table th { padding: .85rem; }
-            .mcwt-transaction-log .mcwt-table td { padding: .85rem; background: #fff; transition: background .2s ease; }
-            .mcwt-transaction-log .mcwt-table tr:nth-child(odd) td { background: #f5f7ff; }
-            .mcwt-transaction-log .mcwt-table tbody tr:hover td { background: #eef2ff; }
-            .mcwt-transaction-log a { color: #2563eb; font-weight: 500; }
-            .mcwt-transaction-log a:hover { color: #1d4ed8; }
+            .mcwt-log-surface { padding: clamp(1.75rem, 4vw, 3rem) clamp(1rem, 3vw, 2.5rem); background: radial-gradient(circle at top right, #fdf2f8 0%, #e0f2fe 55%, #eef2ff 100%); }
+            .mcwt-transaction-log { width: min(1200px, 100%); margin: 0 auto; background: rgba(255,255,255,0.95); padding: clamp(1.5rem, 3vw, 2.3rem); border-radius: 16px; box-shadow: 0 22px 58px rgba(15,23,42,.1); border: 1px solid rgba(148,163,184,.18); backdrop-filter: blur(6px); }
+            .mcwt-log-header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
+            .mcwt-log-header h2 { margin: 0; font-size: 1.85rem; letter-spacing: -0.01em; }
+            .mcwt-clear-log { margin: 0; }
+            .mcwt-clear-log .button { background: linear-gradient(135deg, #f97316, #ef4444); border: none; color: #fff; border-radius: 999px; padding: .6rem 1.4rem; box-shadow: 0 12px 26px rgba(249,115,22,.24); transition: transform .18s ease, box-shadow .18s ease; }
+            .mcwt-clear-log .button:hover { transform: translateY(-1px); box-shadow: 0 16px 32px rgba(249,115,22,.28); }
+            .mcwt-transaction-log .mcwt-table { border-radius: 14px; overflow: hidden; box-shadow: 0 18px 42px rgba(15,23,42,.08); }
+            .mcwt-transaction-log .mcwt-table thead { background: linear-gradient(135deg, #0f172a, #1d4ed8); color: #fff; }
+            .mcwt-transaction-log .mcwt-table th { padding: .9rem; text-align: left; }
+            .mcwt-transaction-log .mcwt-table td { padding: .9rem; background: rgba(255,255,255,.96); transition: background .2s ease; }
+            .mcwt-transaction-log .mcwt-table tr:nth-child(odd) td { background: rgba(226,232,240,.55); }
+            .mcwt-transaction-log .mcwt-table tbody tr:hover td { background: rgba(191,219,254,.55); }
+            .mcwt-transaction-log a { color: #1d4ed8; font-weight: 600; text-decoration: none; }
+            .mcwt-transaction-log a:hover { text-decoration: underline; }
             @media (max-width: 782px) {
-                .mcwt-log-surface { padding: 2rem 1rem; }
-                .mcwt-transaction-log { padding: 1.25rem; border-radius: 10px; }
+                .mcwt-log-surface { padding: 1.75rem 1rem; }
+                .mcwt-transaction-log { padding: 1.25rem; border-radius: 14px; }
+                .mcwt-log-header { flex-direction: column; align-items: flex-start; }
             }
         </style>
         <?php
@@ -570,14 +676,62 @@ class MCWT_MultiChain_Wallet_Monitor {
         }));
         update_option(self::OPTION_WALLETS, $wallets);
 
-        $meta = get_option(self::OPTION_META, []);
-        $key = $this->wallet_meta_key($address, $chain);
-        if (isset($meta[$key])) {
-            unset($meta[$key]);
-            update_option(self::OPTION_META, $meta);
-        }
+        $this->remove_wallet_meta_entries([
+            [
+                'address' => $address,
+                'chain' => $chain,
+            ],
+        ]);
 
         $this->add_notice(__('Wallet removed.', 'mcwt'));
+        $this->redirect_back();
+    }
+
+    public function handle_bulk_delete_wallets() {
+        $this->verify_permissions('mcwt_bulk_delete_wallets', 'manage_options');
+
+        $raw = isset($_POST['mcwt_wallets']) ? (array) wp_unslash($_POST['mcwt_wallets']) : [];
+        $targets = [];
+        foreach ($raw as $value) {
+            $parts = explode('|', (string) $value);
+            if (count($parts) !== 2) {
+                continue;
+            }
+            $address = sanitize_text_field($parts[0]);
+            $chain = sanitize_key($parts[1]);
+            if (!$address || !in_array($chain, ['eth', 'bsc', 'sol'], true)) {
+                continue;
+            }
+            $targets[$address . '|' . $chain] = [
+                'address' => $address,
+                'chain' => $chain,
+            ];
+        }
+
+        if (empty($targets)) {
+            $this->add_notice(__('Select at least one wallet to remove.', 'mcwt'), 'error');
+            $this->redirect_back();
+        }
+
+        $wallets = $this->get_wallets();
+        $before_count = count($wallets);
+        if ($before_count) {
+            $wallets = array_values(array_filter($wallets, static function ($wallet) use ($targets) {
+                $key = $wallet['address'] . '|' . $wallet['chain'];
+                return !isset($targets[$key]);
+            }));
+            update_option(self::OPTION_WALLETS, $wallets);
+        }
+
+        $removed = $before_count - count($wallets);
+        if ($removed > 0) {
+            $this->remove_wallet_meta_entries(array_values($targets));
+            /* translators: %d: number of wallets removed */
+            $this->add_notice(sprintf(_n('%d wallet removed.', '%d wallets removed.', $removed, 'mcwt'), $removed));
+        } else {
+            $this->add_notice(__('No matching wallets were removed.', 'mcwt'), 'error');
+        }
+
         $this->redirect_back();
     }
 
@@ -646,6 +800,14 @@ class MCWT_MultiChain_Wallet_Monitor {
         update_option(self::OPTION_KEYS, $keys);
 
         $this->add_notice(__('Message template saved.', 'mcwt'));
+        $this->redirect_back();
+    }
+
+    public function handle_clear_log() {
+        $this->verify_permissions('mcwt_clear_log', 'manage_options');
+
+        update_option(self::OPTION_LOG, []);
+        $this->add_notice(__('Transaction log cleared.', 'mcwt'));
         $this->redirect_back();
     }
 
@@ -1073,7 +1235,7 @@ class MCWT_MultiChain_Wallet_Monitor {
             'hash' => $data['hash'],
             'explorer' => $data['explorer'],
         ]);
-        $log = array_slice($log, 0, 200);
+        $log = array_slice($log, 0, 100);
         update_option(self::OPTION_LOG, $log);
     }
 
@@ -1103,6 +1265,33 @@ class MCWT_MultiChain_Wallet_Monitor {
             ],
             'body' => wp_json_encode(['content' => $content]),
         ]);
+    }
+
+    private function remove_wallet_meta_entries($targets) {
+        if (empty($targets) || !is_array($targets)) {
+            return;
+        }
+
+        $meta = get_option(self::OPTION_META, []);
+        if (!is_array($meta) || empty($meta)) {
+            return;
+        }
+
+        $changed = false;
+        foreach ($targets as $target) {
+            if (empty($target['address']) || empty($target['chain'])) {
+                continue;
+            }
+            $key = $this->wallet_meta_key($target['address'], $target['chain']);
+            if (isset($meta[$key])) {
+                unset($meta[$key]);
+                $changed = true;
+            }
+        }
+
+        if ($changed) {
+            update_option(self::OPTION_META, $meta);
+        }
     }
 
     private function wallet_meta_key($address, $chain) {
