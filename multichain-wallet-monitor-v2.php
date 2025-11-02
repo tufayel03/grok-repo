@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Multi-Chain Wallet Monitor
  * Description: Track ETH, BSC, and SOL wallets, log transactions, and send Discord alerts from a front-end control panel.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: Grok AI
  */
 
@@ -20,7 +20,7 @@ class MCWT_MultiChain_Wallet_Monitor {
     const CRON_HOOK = 'mcwt_poll_transactions';
     const CRON_SCHEDULE = 'mcwt_custom_interval';
     const DEFAULT_INTERVAL = 5; // minutes
-    const USER_AGENT = 'MCWT-Wallet-Monitor/1.3.0';
+    const USER_AGENT = 'MCWT-Wallet-Monitor/1.3.1';
 
     public function __construct() {
         register_activation_hook(__FILE__, [__CLASS__, 'activate']);
@@ -188,6 +188,7 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         ob_start();
         ?>
+        <div class="mcwt-surface">
         <div class="mcwt-control-panel">
             <h2><?php esc_html_e('Wallet Control Panel', 'mcwt'); ?></h2>
             <?php $this->render_notices(); ?>
@@ -401,7 +402,9 @@ class MCWT_MultiChain_Wallet_Monitor {
                 </form>
             </section>
         </div>
+        </div>
         <style>
+            .mcwt-surface { padding: 3rem 1rem; background: linear-gradient(135deg, #eef2ff, #f8fafc); }
             .mcwt-control-panel { max-width: 1040px; margin: 2rem auto; background: #fff; padding: 2rem; border-radius: 12px; box-shadow: 0 15px 30px rgba(0,0,0,.08); }
             .mcwt-control-panel h2 { margin-bottom: 1.5rem; font-size: 1.8rem; }
             .mcwt-control-panel section { margin-bottom: 2rem; }
@@ -435,6 +438,12 @@ class MCWT_MultiChain_Wallet_Monitor {
             .mcwt-wallet-actions form { margin: 0; flex: 1 1 260px; background: #f8fafc; border: 1px solid #e2e8f0; padding: .75rem; border-radius: 8px; }
             .mcwt-update-wallet textarea { resize: vertical; min-height: 80px; }
             .mcwt-wallet-actions .button-small { margin-top: .5rem; }
+            .mcwt-control-panel .button.button-primary { background: linear-gradient(135deg, #2563eb, #7c3aed); border: none; box-shadow: 0 8px 16px rgba(37,99,235,.25); transition: transform .15s ease, box-shadow .15s ease; }
+            .mcwt-control-panel .button.button-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 22px rgba(37,99,235,.28); }
+            .mcwt-control-panel .button.button-secondary { background: #e2e8f0; border: none; color: #1f2937; }
+            .mcwt-control-panel .button.button-secondary:hover { background: #cbd5f5; color: #111827; }
+            .mcwt-control-panel .button.button-small { background: #0f172a; color: #fff; border: none; }
+            .mcwt-control-panel .button.button-small:hover { background: #1e293b; }
             .mcwt-wallet-actions .description, .mcwt-add-wallet .description { display: block; font-size: 12px; color: #666; margin-top: .3rem; }
             .mcwt-pagination { margin-top: 1.25rem; display: flex; gap: .5rem; }
             .mcwt-pagination .button { text-decoration: none; border-radius: 999px; padding: .4rem 1rem; }
@@ -444,7 +453,8 @@ class MCWT_MultiChain_Wallet_Monitor {
             .mcwt-chain-sol { background: #e0f2fe; color: #0c4a6e; }
             .mcwt-notices .notice { margin: 0 0 1rem; }
             @media (max-width: 782px) {
-                .mcwt-control-panel { padding: 1.25rem; }
+                .mcwt-surface { padding: 2rem 1rem; }
+                .mcwt-control-panel { padding: 1.25rem; border-radius: 10px; }
                 .mcwt-wallet-actions { flex-direction: column; }
             }
         </style>
@@ -461,6 +471,7 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         ob_start();
         ?>
+        <div class="mcwt-log-surface">
         <div class="mcwt-transaction-log">
             <h2><?php esc_html_e('Latest Transactions', 'mcwt'); ?></h2>
             <table class="widefat mcwt-table">
@@ -492,7 +503,9 @@ class MCWT_MultiChain_Wallet_Monitor {
                 </tbody>
             </table>
         </div>
+        </div>
         <style>
+            .mcwt-log-surface { padding: 3rem 1rem; background: linear-gradient(160deg, #f1f5f9, #fdf2f8); }
             .mcwt-transaction-log { max-width: 1040px; margin: 2rem auto; background: #fff; padding: 2rem; border-radius: 12px; box-shadow: 0 15px 30px rgba(0,0,0,.08); }
             .mcwt-transaction-log h2 { margin-bottom: 1.5rem; font-size: 1.8rem; }
             .mcwt-transaction-log .mcwt-table { border-radius: 10px; overflow: hidden; box-shadow: 0 10px 24px rgba(15,23,42,.06); }
@@ -501,6 +514,10 @@ class MCWT_MultiChain_Wallet_Monitor {
             .mcwt-transaction-log .mcwt-table td { padding: .85rem; background: #fff; }
             .mcwt-transaction-log .mcwt-table tr:nth-child(odd) td { background: #f5f7ff; }
             .mcwt-transaction-log a { color: #2563eb; font-weight: 500; }
+            @media (max-width: 782px) {
+                .mcwt-log-surface { padding: 2rem 1rem; }
+                .mcwt-transaction-log { padding: 1.25rem; border-radius: 10px; }
+            }
         </style>
         <?php
         return ob_get_clean();
@@ -809,16 +826,21 @@ class MCWT_MultiChain_Wallet_Monitor {
 
     private function perform_etherscan_call($base_url, $address, $api_key, $chain, $use_v2 = false) {
         $endpoint = $use_v2
-            ? trailingslashit($base_url) . 'api/v2/addresses/' . rawurlencode($address) . '/transactions'
+            ? trailingslashit($base_url) . 'v2/api'
             : trailingslashit($base_url) . 'api';
 
-        $query = $use_v2
-            ? [
+        if ($use_v2) {
+            $query = [
+                'chainid' => ('bsc' === $chain) ? 56 : 1,
+                'module' => 'account',
+                'action' => 'txlist',
+                'address' => $address,
                 'page' => 1,
                 'offset' => 1,
                 'sort' => 'desc',
-            ]
-            : [
+            ];
+        } else {
+            $query = [
                 'module' => 'account',
                 'action' => 'txlist',
                 'address' => $address,
@@ -828,25 +850,26 @@ class MCWT_MultiChain_Wallet_Monitor {
                 'offset' => 1,
                 'sort' => 'desc',
             ];
-
-        if ($use_v2) {
-            $query['chainid'] = ('bsc' === $chain) ? 56 : 1;
-            $query['module'] = 'account';
-            $query['action'] = 'txlist';
-            $query['address'] = $address;
-            $query['startblock'] = 0;
-            $query['endblock'] = 99999999;
         }
 
+        $headers = [
+            'User-Agent' => self::USER_AGENT,
+            'Accept' => 'application/json',
+        ];
+
         if (!empty($api_key)) {
-            $query['apikey'] = $api_key;
+            if ($use_v2) {
+                $headers['X-API-Key'] = $api_key;
+                $headers['x-apikey'] = $api_key;
+                $query['apikey'] = $api_key;
+            } else {
+                $query['apikey'] = $api_key;
+            }
         }
 
         $args = [
             'timeout' => 20,
-            'headers' => [
-                'User-Agent' => self::USER_AGENT,
-            ],
+            'headers' => $headers,
         ];
 
         $url = add_query_arg($query, $endpoint);
