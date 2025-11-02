@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Multi-Chain Wallet Monitor
  * Description: Track ETH, BSC, and SOL wallets, log transactions, and send Discord alerts from a front-end control panel.
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: Grok AI
  */
 
@@ -20,7 +20,7 @@ class MCWT_MultiChain_Wallet_Monitor {
     const CRON_HOOK = 'mcwt_poll_transactions';
     const CRON_SCHEDULE = 'mcwt_custom_interval';
     const DEFAULT_INTERVAL = 5; // minutes
-    const USER_AGENT = 'MCWT-Wallet-Monitor/1.5.0';
+    const USER_AGENT = 'MCWT-Wallet-Monitor/1.6.0';
 
     public function __construct() {
         register_activation_hook(__FILE__, [__CLASS__, 'activate']);
@@ -414,15 +414,18 @@ class MCWT_MultiChain_Wallet_Monitor {
                         <label for="mcwt_discord_message"><?php esc_html_e('Discord Message Template', 'mcwt'); ?></label><br />
                         <textarea id="mcwt_discord_message" name="mcwt_message" rows="3" class="large-text"><?php echo esc_textarea($api_keys['discord_message']); ?></textarea>
                     </p>
-                    <p class="description"><?php esc_html_e('Available tags: {label}, {address}, {hash}, {chain}, {amount}', 'mcwt'); ?></p>
+                    <p class="description"><?php esc_html_e('Available tags: {label}, {address}, {hash}, {chain}, {amount}. Leave blank to use the default template.', 'mcwt'); ?></p>
                     <p><button type="submit" class="button button-secondary"><?php esc_html_e('Save Message', 'mcwt'); ?></button></p>
                 </form>
             </section>
         </div>
         </div>
         <style>
-            .mcwt-surface { padding: clamp(1.5rem, 4vw, 3rem) clamp(1rem, 3vw, 2.5rem); background: radial-gradient(circle at top left, #eff6ff 0%, #e0e7ff 35%, #f8fafc 100%); min-height: 100%; }
-            .mcwt-control-panel { width: min(1200px, 100%); margin: 0 auto; background: rgba(255, 255, 255, 0.94); border-radius: 16px; padding: clamp(1.5rem, 3vw, 2.4rem); box-shadow: 0 24px 60px rgba(15,23,42,.12); border: 1px solid rgba(148,163,184,.18); backdrop-filter: blur(6px); }
+            .mcwt-surface { position: relative; padding: clamp(1.5rem, 4vw, 3rem) clamp(1rem, 3vw, 2.5rem); background: radial-gradient(circle at top left, #eff6ff 0%, #e0e7ff 35%, #f8fafc 100%); min-height: 100vh; display: flex; align-items: stretch; justify-content: center; overflow: hidden; }
+            .mcwt-surface::before, .mcwt-surface::after { content: ""; position: absolute; pointer-events: none; border-radius: 50%; filter: blur(80px); opacity: 0.55; }
+            .mcwt-surface::before { width: 420px; height: 420px; background: radial-gradient(circle, rgba(59,130,246,.35), rgba(99,102,241,.05)); top: -160px; right: 8%; }
+            .mcwt-surface::after { width: 520px; height: 520px; background: radial-gradient(circle, rgba(236,72,153,.28), rgba(129,140,248,.08)); bottom: -220px; left: 6%; }
+            .mcwt-control-panel { position: relative; width: 100%; margin: 0; background: rgba(255, 255, 255, 0.94); border-radius: 20px; padding: clamp(1.5rem, 3vw, 2.6rem); box-shadow: 0 32px 80px rgba(15,23,42,.16); border: 1px solid rgba(148,163,184,.2); backdrop-filter: blur(8px); box-sizing: border-box; }
             .mcwt-control-panel h2 { margin-bottom: 1.25rem; font-size: 1.85rem; letter-spacing: -0.01em; }
             .mcwt-control-panel section { margin-bottom: 2rem; }
             .mcwt-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2.25rem; }
@@ -497,7 +500,7 @@ class MCWT_MultiChain_Wallet_Monitor {
             }
             @media (max-width: 782px) {
                 .mcwt-surface { padding: 1.75rem 1rem; }
-                .mcwt-control-panel { padding: 1.25rem; border-radius: 14px; }
+                .mcwt-control-panel { padding: 1.25rem; border-radius: 16px; }
                 .mcwt-wallet-actions { grid-template-columns: 1fr; }
             }
         </style>
@@ -610,8 +613,11 @@ class MCWT_MultiChain_Wallet_Monitor {
         </div>
         </div>
         <style>
-            .mcwt-log-surface { padding: clamp(1.75rem, 4vw, 3rem) clamp(1rem, 3vw, 2.5rem); background: radial-gradient(circle at top right, #fdf2f8 0%, #e0f2fe 55%, #eef2ff 100%); }
-            .mcwt-transaction-log { width: min(1200px, 100%); margin: 0 auto; background: rgba(255,255,255,0.95); padding: clamp(1.5rem, 3vw, 2.3rem); border-radius: 16px; box-shadow: 0 22px 58px rgba(15,23,42,.1); border: 1px solid rgba(148,163,184,.18); backdrop-filter: blur(6px); }
+            .mcwt-log-surface { position: relative; padding: clamp(1.75rem, 4vw, 3rem) clamp(1rem, 3vw, 2.5rem); background: radial-gradient(circle at top right, #fdf2f8 0%, #e0f2fe 55%, #eef2ff 100%); min-height: 100vh; display: flex; align-items: stretch; justify-content: center; overflow: hidden; }
+            .mcwt-log-surface::before, .mcwt-log-surface::after { content: ""; position: absolute; pointer-events: none; border-radius: 50%; filter: blur(90px); opacity: 0.5; }
+            .mcwt-log-surface::before { width: 460px; height: 460px; background: radial-gradient(circle, rgba(79,70,229,.22), rgba(125,211,252,.08)); top: -200px; left: 12%; }
+            .mcwt-log-surface::after { width: 520px; height: 520px; background: radial-gradient(circle, rgba(244,114,182,.25), rgba(129,140,248,.08)); bottom: -240px; right: 10%; }
+            .mcwt-transaction-log { position: relative; width: 100%; margin: 0; background: rgba(255,255,255,0.95); padding: clamp(1.5rem, 3vw, 2.4rem); border-radius: 20px; box-shadow: 0 30px 74px rgba(15,23,42,.14); border: 1px solid rgba(148,163,184,.2); backdrop-filter: blur(8px); box-sizing: border-box; }
             .mcwt-log-header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
             .mcwt-log-header h2 { margin: 0; font-size: 1.85rem; letter-spacing: -0.01em; }
             .mcwt-clear-log { margin: 0; }
@@ -627,7 +633,7 @@ class MCWT_MultiChain_Wallet_Monitor {
             .mcwt-transaction-log a:hover { text-decoration: underline; }
             @media (max-width: 782px) {
                 .mcwt-log-surface { padding: 1.75rem 1rem; }
-                .mcwt-transaction-log { padding: 1.25rem; border-radius: 14px; }
+                .mcwt-transaction-log { padding: 1.25rem; border-radius: 16px; }
                 .mcwt-log-header { flex-direction: column; align-items: flex-start; }
             }
         </style>
@@ -985,6 +991,7 @@ class MCWT_MultiChain_Wallet_Monitor {
     private function perform_etherscan_call($service, $address, $api_key, $chain) {
         $base_url = 'etherscan' === $service ? 'https://api.etherscan.io/v2/api' : 'https://api.bscscan.com/v2/api';
         $query = [
+            'module' => 'account',
             'chainid' => ('bsc' === $chain) ? 56 : 1,
             'action' => 'txlist',
             'address' => $address,
