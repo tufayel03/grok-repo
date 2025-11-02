@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Multi-Chain Wallet Monitor
  * Description: Track ETH, BSC, and SOL wallets, log transactions, and send Discord alerts from a front-end control panel.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Grok AI
  */
 
@@ -15,6 +15,7 @@ class MCWT_MultiChain_Wallet_Monitor {
     const OPTION_KEYS = 'mcwt_api_keys';
     const OPTION_META = 'mcwt_wallet_meta';
     const OPTION_LOG = 'mcwt_tx_log';
+    const OPTION_LAST_RUN = 'mcwt_last_poll';
     const CRON_HOOK = 'mcwt_poll_transactions';
     const CRON_SCHEDULE = 'mcwt_custom_interval';
     const DEFAULT_INTERVAL = 5; // minutes
@@ -25,6 +26,7 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         add_filter('cron_schedules', [$this, 'register_cron_schedules']);
         add_action('init', [$this, 'ensure_schedule']);
+        add_action('init', [$this, 'maybe_run_poll'], 20);
         add_action(self::CRON_HOOK, [$this, 'poll_transactions']);
 
         add_shortcode('wallet_tracker', [$this, 'render_control_panel']);
@@ -32,6 +34,7 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         add_action('admin_post_mcwt_add_wallet', [$this, 'handle_add_wallet']);
         add_action('admin_post_mcwt_delete_wallet', [$this, 'handle_delete_wallet']);
+        add_action('admin_post_mcwt_update_wallet', [$this, 'handle_update_wallet']);
         add_action('admin_post_mcwt_update_keys', [$this, 'handle_update_keys']);
         add_action('admin_post_mcwt_update_message', [$this, 'handle_update_message']);
     }
@@ -48,6 +51,7 @@ class MCWT_MultiChain_Wallet_Monitor {
         ]);
         add_option(self::OPTION_META, []);
         add_option(self::OPTION_LOG, []);
+        add_option(self::OPTION_LAST_RUN, 0);
 
         if (!wp_next_scheduled(self::CRON_HOOK)) {
             wp_schedule_event(time() + 60, self::CRON_SCHEDULE, self::CRON_HOOK);
@@ -80,6 +84,26 @@ class MCWT_MultiChain_Wallet_Monitor {
         }
     }
 
+    public function maybe_run_poll() {
+        if (defined('DOING_CRON') && DOING_CRON) {
+            return;
+        }
+        if (function_exists('wp_doing_ajax') && wp_doing_ajax()) {
+            return;
+        }
+        if (defined('REST_REQUEST') && REST_REQUEST) {
+            return;
+        }
+
+        $last_run = (int) get_option(self::OPTION_LAST_RUN, 0);
+        $interval = $this->get_poll_interval_minutes() * MINUTE_IN_SECONDS;
+        if ($last_run && (time() - $last_run) < $interval) {
+            return;
+        }
+
+        $this->poll_transactions();
+    }
+
     private function maybe_upgrade_options() {
         $keys = get_option(self::OPTION_KEYS);
         if (!is_array($keys)) {
@@ -94,6 +118,25 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         if ($updated) {
             update_option(self::OPTION_KEYS, $keys);
+        }
+
+        $wallets = get_option(self::OPTION_WALLETS, []);
+        if (is_array($wallets)) {
+            $wallets_updated = false;
+            foreach ($wallets as &$wallet) {
+                if (is_array($wallet) && !isset($wallet['message'])) {
+                    $wallet['message'] = '';
+                    $wallets_updated = true;
+                }
+            }
+            unset($wallet);
+            if ($wallets_updated) {
+                update_option(self::OPTION_WALLETS, $wallets);
+            }
+        }
+
+        if (false === get_option(self::OPTION_LAST_RUN, false)) {
+            add_option(self::OPTION_LAST_RUN, 0);
         }
     }
 
@@ -120,6 +163,7 @@ class MCWT_MultiChain_Wallet_Monitor {
         $display_wallets = array_slice($wallets, $offset, $per_page);
 
         $api_keys = $this->get_api_keys();
+        $default_message = $api_keys['discord_message'];
 
         ob_start();
         ?>
@@ -152,6 +196,12 @@ class MCWT_MultiChain_Wallet_Monitor {
                         </label>
                     </p>
                     <p>
+                        <label><?php esc_html_e('Custom Discord Message', 'mcwt'); ?><br />
+                            <textarea name="mcwt_message" rows="2" placeholder="<?php echo esc_attr__('Leave empty to use the default template.', 'mcwt'); ?>"></textarea>
+                        </label>
+                        <span class="description"><?php esc_html_e('Available tags: {label}, {address}, {hash}, {chain}, {amount}. Leave blank to use the default template.', 'mcwt'); ?></span>
+                    </p>
+                    <p>
                         <button type="submit" class="button button-primary"><?php esc_html_e('Add Wallet', 'mcwt'); ?></button>
                     </p>
                 </form>
@@ -173,29 +223,56 @@ class MCWT_MultiChain_Wallet_Monitor {
                             <th><?php esc_html_e('Label', 'mcwt'); ?></th>
                             <th><?php esc_html_e('Address', 'mcwt'); ?></th>
                             <th><?php esc_html_e('Chain', 'mcwt'); ?></th>
+                            <th><?php esc_html_e('Message', 'mcwt'); ?></th>
                             <th><?php esc_html_e('Actions', 'mcwt'); ?></th>
                         </tr>
                     </thead>
                     <tbody>
                     <?php if (empty($display_wallets)) : ?>
                         <tr>
-                            <td colspan="4"><?php esc_html_e('No wallets found.', 'mcwt'); ?></td>
+                            <td colspan="5"><?php esc_html_e('No wallets found.', 'mcwt'); ?></td>
                         </tr>
                     <?php else :
                         foreach ($display_wallets as $wallet) :
+                            $wallet_message = isset($wallet['message']) ? $wallet['message'] : '';
+                            $message_preview = $wallet_message ? wp_trim_words($wallet_message, 16, '&hellip;') : wp_trim_words($default_message, 16, '&hellip;');
                             ?>
                             <tr>
                                 <td><?php echo esc_html($wallet['label']); ?></td>
                                 <td><code><?php echo esc_html($wallet['address']); ?></code></td>
                                 <td><?php echo esc_html(strtoupper($wallet['chain'])); ?></td>
+                                <td><?php echo esc_html($message_preview); ?></td>
                                 <td>
-                                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" onsubmit="return confirm('<?php echo esc_js(__('Remove this wallet?', 'mcwt')); ?>');">
-                                        <?php wp_nonce_field('mcwt_delete_wallet'); ?>
-                                        <input type="hidden" name="action" value="mcwt_delete_wallet" />
-                                        <input type="hidden" name="mcwt_address" value="<?php echo esc_attr($wallet['address']); ?>" />
-                                        <input type="hidden" name="mcwt_chain" value="<?php echo esc_attr($wallet['chain']); ?>" />
-                                        <button type="submit" class="button button-secondary"><?php esc_html_e('Remove', 'mcwt'); ?></button>
-                                    </form>
+                                    <div class="mcwt-wallet-actions">
+                                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="mcwt-update-wallet">
+                                            <?php wp_nonce_field('mcwt_update_wallet'); ?>
+                                            <input type="hidden" name="action" value="mcwt_update_wallet" />
+                                            <input type="hidden" name="mcwt_address" value="<?php echo esc_attr($wallet['address']); ?>" />
+                                            <input type="hidden" name="mcwt_chain" value="<?php echo esc_attr($wallet['chain']); ?>" />
+                                            <p>
+                                                <label><?php esc_html_e('Label', 'mcwt'); ?><br />
+                                                    <input type="text" name="mcwt_label" value="<?php echo esc_attr($wallet['label']); ?>" required />
+                                                </label>
+                                            </p>
+                                            <p>
+                                                <label><?php esc_html_e('Discord Message', 'mcwt'); ?><br />
+                                                    <textarea name="mcwt_message" rows="3" placeholder="<?php echo esc_attr__('Leave empty to use the default template.', 'mcwt'); ?>"><?php echo esc_textarea($wallet_message); ?></textarea>
+                                                </label>
+                                                <span class="description"><?php esc_html_e('Available tags: {label}, {address}, {hash}, {chain}, {amount}. Leave blank to use the default template.', 'mcwt'); ?></span>
+                                            </p>
+                                            <p>
+                                                <button type="submit" class="button button-primary button-small"><?php esc_html_e('Save', 'mcwt'); ?></button>
+                                            </p>
+                                        </form>
+                                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" onsubmit="return confirm('<?php echo esc_js(__('Remove this wallet?', 'mcwt')); ?>');">
+                                            <?php wp_nonce_field('mcwt_delete_wallet'); ?>
+                                            <input type="hidden" name="action" value="mcwt_delete_wallet" />
+                                            <input type="hidden" name="mcwt_address" value="<?php echo esc_attr($wallet['address']); ?>" />
+                                            <input type="hidden" name="mcwt_chain" value="<?php echo esc_attr($wallet['chain']); ?>" />
+                        
+                                            <button type="submit" class="button button-secondary button-small"><?php esc_html_e('Remove', 'mcwt'); ?></button>
+                                        </form>
+                                    </div>
                                 </td>
                             </tr>
                         <?php
@@ -268,6 +345,12 @@ class MCWT_MultiChain_Wallet_Monitor {
             .mcwt-control-panel section { margin-bottom: 2rem; }
             .mcwt-pagination { margin-top: 1rem; display: flex; gap: .5rem; }
             .mcwt-pagination .button { text-decoration: none; }
+            .mcwt-wallet-actions { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+            .mcwt-wallet-actions form { margin: 0; }
+            .mcwt-update-wallet input[type="text"], .mcwt-update-wallet textarea { width: 100%; }
+            .mcwt-update-wallet textarea { resize: vertical; }
+            .mcwt-wallet-actions .button-small { margin-top: .5rem; }
+            .mcwt-wallet-actions .description, .mcwt-add-wallet .description { display: block; font-size: 12px; color: #666; margin-top: .3rem; }
         </style>
         <?php
         return ob_get_clean();
@@ -326,6 +409,7 @@ class MCWT_MultiChain_Wallet_Monitor {
         $label = isset($_POST['mcwt_label']) ? sanitize_text_field(wp_unslash($_POST['mcwt_label'])) : '';
         $address = isset($_POST['mcwt_address']) ? sanitize_text_field(wp_unslash($_POST['mcwt_address'])) : '';
         $chain = isset($_POST['mcwt_chain']) ? sanitize_key(wp_unslash($_POST['mcwt_chain'])) : '';
+        $message = isset($_POST['mcwt_message']) ? sanitize_textarea_field(wp_unslash($_POST['mcwt_message'])) : '';
 
         if ($label && $address && in_array($chain, ['eth', 'bsc', 'sol'], true)) {
             $wallets = $this->get_wallets();
@@ -333,6 +417,7 @@ class MCWT_MultiChain_Wallet_Monitor {
                 'label' => $label,
                 'address' => $address,
                 'chain' => $chain,
+                'message' => $message,
             ];
             update_option(self::OPTION_WALLETS, $wallets);
             $this->add_notice(__('Wallet added.', 'mcwt'));
@@ -367,6 +452,41 @@ class MCWT_MultiChain_Wallet_Monitor {
         }
 
         $this->add_notice(__('Wallet removed.', 'mcwt'));
+        $this->redirect_back();
+    }
+
+    public function handle_update_wallet() {
+        $this->verify_permissions('mcwt_update_wallet', 'manage_options');
+
+        $address = isset($_POST['mcwt_address']) ? sanitize_text_field(wp_unslash($_POST['mcwt_address'])) : '';
+        $chain = isset($_POST['mcwt_chain']) ? sanitize_key(wp_unslash($_POST['mcwt_chain'])) : '';
+        $label = isset($_POST['mcwt_label']) ? sanitize_text_field(wp_unslash($_POST['mcwt_label'])) : '';
+        $message = isset($_POST['mcwt_message']) ? sanitize_textarea_field(wp_unslash($_POST['mcwt_message'])) : '';
+
+        if (!$address || !$label || !in_array($chain, ['eth', 'bsc', 'sol'], true)) {
+            $this->add_notice(__('Invalid wallet update request.', 'mcwt'), 'error');
+            $this->redirect_back();
+        }
+
+        $wallets = $this->get_wallets();
+        $updated = false;
+        foreach ($wallets as &$wallet) {
+            if ($wallet['address'] === $address && $wallet['chain'] === $chain) {
+                $wallet['label'] = $label;
+                $wallet['message'] = $message;
+                $updated = true;
+                break;
+            }
+        }
+        unset($wallet);
+
+        if ($updated) {
+            update_option(self::OPTION_WALLETS, $wallets);
+            $this->add_notice(__('Wallet updated.', 'mcwt'));
+        } else {
+            $this->add_notice(__('Wallet could not be updated.', 'mcwt'), 'error');
+        }
+
         $this->redirect_back();
     }
 
@@ -446,7 +566,22 @@ class MCWT_MultiChain_Wallet_Monitor {
 
     private function get_wallets() {
         $wallets = get_option(self::OPTION_WALLETS, []);
-        return is_array($wallets) ? $wallets : [];
+        if (!is_array($wallets)) {
+            return [];
+        }
+
+        $normalized = [];
+        foreach ($wallets as $wallet) {
+            if (!is_array($wallet) || empty($wallet['address']) || empty($wallet['chain'])) {
+                continue;
+            }
+            if (!isset($wallet['message'])) {
+                $wallet['message'] = '';
+            }
+            $normalized[] = $wallet;
+        }
+
+        return $normalized;
     }
 
     private function get_api_keys() {
@@ -483,48 +618,70 @@ class MCWT_MultiChain_Wallet_Monitor {
     }
 
     public function poll_transactions() {
-        $wallets = $this->get_wallets();
-        if (empty($wallets)) {
+        if (!$this->acquire_poll_lock()) {
             return;
         }
 
-        $meta = get_option(self::OPTION_META, []);
-        $keys = $this->get_api_keys();
-        foreach ($wallets as $wallet) {
-            $latest = $this->fetch_latest_transaction($wallet, $keys);
-            if (!$latest) {
-                continue;
-            }
-            $key = $this->wallet_meta_key($wallet['address'], $wallet['chain']);
-            $last_hash = isset($meta[$key]) ? $meta[$key] : '';
-            if ($latest['hash'] === $last_hash || empty($latest['hash'])) {
-                continue;
+        try {
+            $wallets = $this->get_wallets();
+            $now = time();
+            if (empty($wallets)) {
+                update_option(self::OPTION_LAST_RUN, $now);
+                return;
             }
 
-            $meta[$key] = $latest['hash'];
-            $this->log_transaction($wallet, $latest);
-            $this->send_discord_alert($wallet, $latest, $keys);
+            $meta = get_option(self::OPTION_META, []);
+            if (!is_array($meta)) {
+                $meta = [];
+            }
+            $meta_changed = false;
+            $keys = $this->get_api_keys();
+            foreach ($wallets as $wallet) {
+                $latest = $this->fetch_latest_transaction($wallet, $keys);
+                if (!$latest) {
+                    continue;
+                }
+                $key = $this->wallet_meta_key($wallet['address'], $wallet['chain']);
+                $last_hash = isset($meta[$key]) ? $meta[$key] : '';
+                if ($latest['hash'] === $last_hash || empty($latest['hash'])) {
+                    continue;
+                }
+
+                $meta[$key] = $latest['hash'];
+                $meta_changed = true;
+                $this->log_transaction($wallet, $latest);
+                $this->send_discord_alert($wallet, $latest, $keys);
+            }
+
+            if ($meta_changed) {
+                update_option(self::OPTION_META, $meta);
+            }
+
+            update_option(self::OPTION_LAST_RUN, $now);
+        } finally {
+            $this->release_poll_lock();
         }
-        update_option(self::OPTION_META, $meta);
     }
 
     private function fetch_latest_transaction($wallet, $keys) {
         switch ($wallet['chain']) {
             case 'eth':
-                return $this->fetch_etherscan_tx($wallet['address'], $keys['etherscan'], 'https://api.etherscan.io');
+                return $this->fetch_etherscan_tx($wallet['address'], $keys['etherscan'], 'https://api.etherscan.io', 'eth');
             case 'bsc':
-                return $this->fetch_etherscan_tx($wallet['address'], $keys['bscscan'], 'https://api.bscscan.com');
+                return $this->fetch_etherscan_tx($wallet['address'], $keys['bscscan'], 'https://api.bscscan.com', 'bsc');
             case 'sol':
                 return $this->fetch_solscan_tx($wallet['address'], $keys['solscan']);
         }
         return null;
     }
 
-    private function fetch_etherscan_tx($address, $api_key, $base_url) {
+    private function fetch_etherscan_tx($address, $api_key, $base_url, $chain) {
         $url = add_query_arg([
             'module' => 'account',
             'action' => 'txlist',
             'address' => $address,
+            'startblock' => 0,
+            'endblock' => 99999999,
             'page' => 1,
             'offset' => 1,
             'sort' => 'desc',
@@ -544,14 +701,15 @@ class MCWT_MultiChain_Wallet_Monitor {
         }
 
         $tx = $body['result'][0];
-        $value = isset($tx['value']) ? $this->format_value($tx['value'], 'eth') : '0';
+        $value = isset($tx['value']) ? $this->format_value($tx['value'], $chain) : '0';
+        $explorer_base = ('eth' === $chain) ? 'https://etherscan.io/tx/' : 'https://bscscan.com/tx/';
         return [
             'hash' => $tx['hash'],
             'from' => $tx['from'],
             'to' => $tx['to'],
             'timestamp' => isset($tx['timeStamp']) ? (int) $tx['timeStamp'] : time(),
             'amount' => $value,
-            'explorer' => $base_url === 'https://api.etherscan.io' ? 'https://etherscan.io/tx/' . $tx['hash'] : 'https://bscscan.com/tx/' . $tx['hash'],
+            'explorer' => $explorer_base . $tx['hash'],
         ];
     }
 
@@ -618,7 +776,7 @@ class MCWT_MultiChain_Wallet_Monitor {
             return;
         }
 
-        $message = $keys['discord_message'];
+        $message = !empty($wallet['message']) ? $wallet['message'] : $keys['discord_message'];
         $replacements = [
             '{label}' => $wallet['label'],
             '{address}' => $wallet['address'],
@@ -626,7 +784,10 @@ class MCWT_MultiChain_Wallet_Monitor {
             '{chain}' => strtoupper($wallet['chain']),
             '{amount}' => $data['amount'],
         ];
-        $content = strtr($message, $replacements);
+        $content = trim(strtr($message, $replacements));
+        if ($content === '') {
+            return;
+        }
 
         wp_remote_post($keys['discord_webhook'], [
             'timeout' => 15,
@@ -637,6 +798,19 @@ class MCWT_MultiChain_Wallet_Monitor {
 
     private function wallet_meta_key($address, $chain) {
         return strtolower($chain . ':' . preg_replace('/\s+/', '', $address));
+    }
+
+    private function acquire_poll_lock() {
+        if (get_transient('mcwt_poll_lock')) {
+            return false;
+        }
+
+        set_transient('mcwt_poll_lock', 1, 60);
+        return true;
+    }
+
+    private function release_poll_lock() {
+        delete_transient('mcwt_poll_lock');
     }
 }
 
