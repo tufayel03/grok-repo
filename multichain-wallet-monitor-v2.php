@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Multi-Chain Wallet Monitor
  * Description: Track ETH, BSC, and SOL wallets, log transactions, and send Discord alerts from a front-end control panel.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: Grok AI
  */
 
@@ -16,9 +16,11 @@ class MCWT_MultiChain_Wallet_Monitor {
     const OPTION_META = 'mcwt_wallet_meta';
     const OPTION_LOG = 'mcwt_tx_log';
     const OPTION_LAST_RUN = 'mcwt_last_poll';
+    const OPTION_ERRORS = 'mcwt_last_errors';
     const CRON_HOOK = 'mcwt_poll_transactions';
     const CRON_SCHEDULE = 'mcwt_custom_interval';
     const DEFAULT_INTERVAL = 5; // minutes
+    const USER_AGENT = 'MCWT-Wallet-Monitor/1.3.0';
 
     public function __construct() {
         register_activation_hook(__FILE__, [__CLASS__, 'activate']);
@@ -52,6 +54,7 @@ class MCWT_MultiChain_Wallet_Monitor {
         add_option(self::OPTION_META, []);
         add_option(self::OPTION_LOG, []);
         add_option(self::OPTION_LAST_RUN, 0);
+        add_option(self::OPTION_ERRORS, []);
 
         if (!wp_next_scheduled(self::CRON_HOOK)) {
             wp_schedule_event(time() + 60, self::CRON_SCHEDULE, self::CRON_HOOK);
@@ -138,6 +141,10 @@ class MCWT_MultiChain_Wallet_Monitor {
         if (false === get_option(self::OPTION_LAST_RUN, false)) {
             add_option(self::OPTION_LAST_RUN, 0);
         }
+
+        if (false === get_option(self::OPTION_ERRORS, false)) {
+            add_option(self::OPTION_ERRORS, []);
+        }
     }
 
     public function render_control_panel() {
@@ -149,6 +156,20 @@ class MCWT_MultiChain_Wallet_Monitor {
         $search = isset($_GET['mcwt_search']) ? sanitize_text_field(wp_unslash($_GET['mcwt_search'])) : '';
         $page = isset($_GET['mcwt_page']) ? max(1, (int) $_GET['mcwt_page']) : 1;
         $per_page = 25;
+
+        $this->prune_unused_errors($wallets);
+        $last_run = (int) get_option(self::OPTION_LAST_RUN, 0);
+        $interval = $this->get_poll_interval_minutes();
+        $next_run = $last_run ? $last_run + ($interval * MINUTE_IN_SECONDS) : 0;
+        $errors = get_option(self::OPTION_ERRORS, []);
+        if (!is_array($errors)) {
+            $errors = [];
+        }
+        $service_labels = [
+            'etherscan' => __('Etherscan', 'mcwt'),
+            'bscscan' => __('BscScan', 'mcwt'),
+            'solscan' => __('Solscan', 'mcwt'),
+        ];
 
         if ($search !== '') {
             $wallets = array_values(array_filter($wallets, static function ($wallet) use ($search) {
@@ -170,6 +191,47 @@ class MCWT_MultiChain_Wallet_Monitor {
         <div class="mcwt-control-panel">
             <h2><?php esc_html_e('Wallet Control Panel', 'mcwt'); ?></h2>
             <?php $this->render_notices(); ?>
+
+            <section class="mcwt-summary">
+                <div class="mcwt-card">
+                    <h3><?php esc_html_e('Last Check', 'mcwt'); ?></h3>
+                    <p><?php echo $last_run ? esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $last_run)) : esc_html__('Never', 'mcwt'); ?></p>
+                </div>
+                <div class="mcwt-card">
+                    <h3><?php esc_html_e('Next Scheduled Check', 'mcwt'); ?></h3>
+                    <p><?php echo $next_run ? esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $next_run)) : esc_html__('Queued on next visit', 'mcwt'); ?></p>
+                </div>
+                <div class="mcwt-card">
+                    <h3><?php esc_html_e('Tracked Wallets', 'mcwt'); ?></h3>
+                    <p><?php echo esc_html(number_format_i18n($total)); ?></p>
+                </div>
+                <div class="mcwt-card">
+                    <h3><?php esc_html_e('Polling Interval', 'mcwt'); ?></h3>
+                    <p><?php echo esc_html(sprintf(_n('%d minute', '%d minutes', $interval, 'mcwt'), $interval)); ?></p>
+                </div>
+            </section>
+
+            <?php if (!empty($errors)) : ?>
+                <section class="mcwt-errors">
+                    <h3><?php esc_html_e('API Issues', 'mcwt'); ?></h3>
+                    <ul>
+                        <?php foreach ($errors as $service => $error) :
+                            if (empty($error['message'])) {
+                                continue;
+                            }
+                            $timestamp = isset($error['timestamp']) ? (int) $error['timestamp'] : 0;
+                            ?>
+                            <li>
+                                <strong><?php echo esc_html(isset($service_labels[$service]) ? $service_labels[$service] : ucfirst($service)); ?>:</strong>
+                                <?php echo esc_html($error['message']); ?>
+                                <?php if ($timestamp) : ?>
+                                    <span class="mcwt-error-time"><?php echo esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $timestamp)); ?></span>
+                                <?php endif; ?>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                </section>
+            <?php endif; ?>
 
             <section class="mcwt-add-wallet">
                 <h3><?php esc_html_e('Add Wallet', 'mcwt'); ?></h3>
@@ -217,7 +279,7 @@ class MCWT_MultiChain_Wallet_Monitor {
 
             <section class="mcwt-wallet-table">
                 <h3><?php esc_html_e('Tracked Wallets', 'mcwt'); ?></h3>
-                <table class="widefat">
+                <table class="mcwt-table widefat">
                     <thead>
                         <tr>
                             <th><?php esc_html_e('Label', 'mcwt'); ?></th>
@@ -240,7 +302,7 @@ class MCWT_MultiChain_Wallet_Monitor {
                             <tr>
                                 <td><?php echo esc_html($wallet['label']); ?></td>
                                 <td><code><?php echo esc_html($wallet['address']); ?></code></td>
-                                <td><?php echo esc_html(strtoupper($wallet['chain'])); ?></td>
+                                <td><span class="mcwt-chain mcwt-chain-<?php echo esc_attr($wallet['chain']); ?>"><?php echo esc_html(strtoupper($wallet['chain'])); ?></span></td>
                                 <td><?php echo esc_html($message_preview); ?></td>
                                 <td>
                                     <div class="mcwt-wallet-actions">
@@ -340,17 +402,51 @@ class MCWT_MultiChain_Wallet_Monitor {
             </section>
         </div>
         <style>
-            .mcwt-control-panel { max-width: 900px; margin: 2rem auto; }
-            .mcwt-control-panel h2 { margin-bottom: 1rem; }
+            .mcwt-control-panel { max-width: 1040px; margin: 2rem auto; background: #fff; padding: 2rem; border-radius: 12px; box-shadow: 0 15px 30px rgba(0,0,0,.08); }
+            .mcwt-control-panel h2 { margin-bottom: 1.5rem; font-size: 1.8rem; }
             .mcwt-control-panel section { margin-bottom: 2rem; }
-            .mcwt-pagination { margin-top: 1rem; display: flex; gap: .5rem; }
-            .mcwt-pagination .button { text-decoration: none; }
-            .mcwt-wallet-actions { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
-            .mcwt-wallet-actions form { margin: 0; }
-            .mcwt-update-wallet input[type="text"], .mcwt-update-wallet textarea { width: 100%; }
-            .mcwt-update-wallet textarea { resize: vertical; }
+            .mcwt-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2.5rem; }
+            .mcwt-card { background: #f7f9fc; border-radius: 10px; padding: 1rem 1.25rem; border: 1px solid #e4e9f2; box-shadow: inset 0 1px 0 rgba(255,255,255,.6); }
+            .mcwt-card h3 { margin: 0 0 .5rem; font-size: .95rem; text-transform: uppercase; letter-spacing: .04em; color: #52606d; }
+            .mcwt-card p { margin: 0; font-size: 1.1rem; font-weight: 600; color: #1f2933; }
+            .mcwt-errors { border: 1px solid #f59f00; background: #fff7e6; border-radius: 8px; padding: 1rem 1.25rem; }
+            .mcwt-errors h3 { margin-top: 0; color: #ad6800; }
+            .mcwt-errors ul { margin: 0; padding-left: 1.2rem; }
+            .mcwt-errors li { margin-bottom: .5rem; font-size: .95rem; }
+            .mcwt-error-time { display: inline-block; margin-left: .5rem; color: #5f6b7a; font-size: .85rem; }
+            .mcwt-add-wallet form, .mcwt-api-keys form { background: #f9fbff; border: 1px solid #e5edff; padding: 1.5rem; border-radius: 10px; box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
+            .mcwt-add-wallet input[type="text"],
+            .mcwt-add-wallet textarea,
+            .mcwt-add-wallet select,
+            .mcwt-update-wallet input[type="text"],
+            .mcwt-update-wallet textarea,
+            .mcwt-search input[type="text"],
+            .mcwt-api-keys input,
+            .mcwt-api-keys textarea { width: 100%; max-width: 100%; border-radius: 6px; border: 1px solid #cbd5f5; padding: .55rem .65rem; box-shadow: inset 0 1px 2px rgba(14,30,37,.1); }
+            .mcwt-search { display: flex; align-items: flex-end; gap: .75rem; }
+            .mcwt-search form { display: flex; gap: .5rem; width: 100%; }
+            .mcwt-search button.button { padding: .55rem 1rem; }
+            .mcwt-wallet-table .mcwt-table { border-radius: 10px; overflow: hidden; box-shadow: 0 10px 24px rgba(15,23,42,.06); }
+            .mcwt-table thead { background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; }
+            .mcwt-table th { font-weight: 600; padding: .85rem; }
+            .mcwt-table td { padding: .85rem; background: #fff; vertical-align: top; }
+            .mcwt-table tr:nth-child(odd) td { background: #f5f7ff; }
+            .mcwt-wallet-actions { display: flex; flex-wrap: wrap; gap: 1rem; align-items: stretch; }
+            .mcwt-wallet-actions form { margin: 0; flex: 1 1 260px; background: #f8fafc; border: 1px solid #e2e8f0; padding: .75rem; border-radius: 8px; }
+            .mcwt-update-wallet textarea { resize: vertical; min-height: 80px; }
             .mcwt-wallet-actions .button-small { margin-top: .5rem; }
             .mcwt-wallet-actions .description, .mcwt-add-wallet .description { display: block; font-size: 12px; color: #666; margin-top: .3rem; }
+            .mcwt-pagination { margin-top: 1.25rem; display: flex; gap: .5rem; }
+            .mcwt-pagination .button { text-decoration: none; border-radius: 999px; padding: .4rem 1rem; }
+            .mcwt-chain { display: inline-block; padding: .2rem .6rem; border-radius: 999px; font-size: .75rem; letter-spacing: .05em; text-transform: uppercase; background: #e2e8f0; color: #1f2937; font-weight: 600; }
+            .mcwt-chain-eth { background: #efe7ff; color: #5b21b6; }
+            .mcwt-chain-bsc { background: #fff7d6; color: #ad6800; }
+            .mcwt-chain-sol { background: #e0f2fe; color: #0c4a6e; }
+            .mcwt-notices .notice { margin: 0 0 1rem; }
+            @media (max-width: 782px) {
+                .mcwt-control-panel { padding: 1.25rem; }
+                .mcwt-wallet-actions { flex-direction: column; }
+            }
         </style>
         <?php
         return ob_get_clean();
@@ -367,7 +463,7 @@ class MCWT_MultiChain_Wallet_Monitor {
         ?>
         <div class="mcwt-transaction-log">
             <h2><?php esc_html_e('Latest Transactions', 'mcwt'); ?></h2>
-            <table class="widefat">
+            <table class="widefat mcwt-table">
                 <thead>
                     <tr>
                         <th><?php esc_html_e('Date', 'mcwt'); ?></th>
@@ -397,7 +493,14 @@ class MCWT_MultiChain_Wallet_Monitor {
             </table>
         </div>
         <style>
-            .mcwt-transaction-log { max-width: 900px; margin: 2rem auto; }
+            .mcwt-transaction-log { max-width: 1040px; margin: 2rem auto; background: #fff; padding: 2rem; border-radius: 12px; box-shadow: 0 15px 30px rgba(0,0,0,.08); }
+            .mcwt-transaction-log h2 { margin-bottom: 1.5rem; font-size: 1.8rem; }
+            .mcwt-transaction-log .mcwt-table { border-radius: 10px; overflow: hidden; box-shadow: 0 10px 24px rgba(15,23,42,.06); }
+            .mcwt-transaction-log .mcwt-table thead { background: linear-gradient(135deg, #6366f1, #4338ca); color: #fff; }
+            .mcwt-transaction-log .mcwt-table th { padding: .85rem; }
+            .mcwt-transaction-log .mcwt-table td { padding: .85rem; background: #fff; }
+            .mcwt-transaction-log .mcwt-table tr:nth-child(odd) td { background: #f5f7ff; }
+            .mcwt-transaction-log a { color: #2563eb; font-weight: 500; }
         </style>
         <?php
         return ob_get_clean();
@@ -666,50 +769,184 @@ class MCWT_MultiChain_Wallet_Monitor {
     private function fetch_latest_transaction($wallet, $keys) {
         switch ($wallet['chain']) {
             case 'eth':
-                return $this->fetch_etherscan_tx($wallet['address'], $keys['etherscan'], 'https://api.etherscan.io', 'eth');
+                return $this->query_etherscan_family('etherscan', $wallet['address'], $keys['etherscan']);
             case 'bsc':
-                return $this->fetch_etherscan_tx($wallet['address'], $keys['bscscan'], 'https://api.bscscan.com', 'bsc');
+                return $this->query_etherscan_family('bscscan', $wallet['address'], $keys['bscscan']);
             case 'sol':
                 return $this->fetch_solscan_tx($wallet['address'], $keys['solscan']);
         }
         return null;
     }
 
-    private function fetch_etherscan_tx($address, $api_key, $base_url, $chain) {
-        $url = add_query_arg([
-            'module' => 'account',
-            'action' => 'txlist',
-            'address' => $address,
-            'startblock' => 0,
-            'endblock' => 99999999,
-            'page' => 1,
-            'offset' => 1,
-            'sort' => 'desc',
-            'apikey' => $api_key,
-        ], trailingslashit($base_url) . 'api');
+    private function query_etherscan_family($service, $address, $api_key) {
+        $base_url = 'etherscan' === $service ? 'https://api.etherscan.io' : 'https://api.bscscan.com';
+        $chain = 'etherscan' === $service ? 'eth' : 'bsc';
 
-        $response = wp_remote_get($url, [
-            'timeout' => 20,
-        ]);
-        if (is_wp_error($response)) {
+        $v2 = $this->perform_etherscan_call($base_url, $address, $api_key, $chain, true);
+        if (isset($v2['success']) && $v2['success']) {
+            $this->clear_api_error($service);
+            return $v2['transaction'];
+        }
+        if (isset($v2['no_tx']) && $v2['no_tx']) {
+            $this->clear_api_error($service);
             return null;
+        }
+
+        $legacy = $this->perform_etherscan_call($base_url, $address, $api_key, $chain, false);
+        if (isset($legacy['success']) && $legacy['success']) {
+            $this->clear_api_error($service);
+            return $legacy['transaction'];
+        }
+        if (isset($legacy['no_tx']) && $legacy['no_tx']) {
+            $this->clear_api_error($service);
+            return null;
+        }
+
+        $error = isset($legacy['error']) ? $legacy['error'] : (isset($v2['error']) ? $v2['error'] : __('Unknown explorer error', 'mcwt'));
+        $this->record_api_error($service, $error);
+        return null;
+    }
+
+    private function perform_etherscan_call($base_url, $address, $api_key, $chain, $use_v2 = false) {
+        $endpoint = $use_v2
+            ? trailingslashit($base_url) . 'api/v2/addresses/' . rawurlencode($address) . '/transactions'
+            : trailingslashit($base_url) . 'api';
+
+        $query = $use_v2
+            ? [
+                'page' => 1,
+                'offset' => 1,
+                'sort' => 'desc',
+            ]
+            : [
+                'module' => 'account',
+                'action' => 'txlist',
+                'address' => $address,
+                'startblock' => 0,
+                'endblock' => 99999999,
+                'page' => 1,
+                'offset' => 1,
+                'sort' => 'desc',
+            ];
+
+        if ($use_v2) {
+            $query['chainid'] = ('bsc' === $chain) ? 56 : 1;
+            $query['module'] = 'account';
+            $query['action'] = 'txlist';
+            $query['address'] = $address;
+            $query['startblock'] = 0;
+            $query['endblock'] = 99999999;
+        }
+
+        if (!empty($api_key)) {
+            $query['apikey'] = $api_key;
+        }
+
+        $args = [
+            'timeout' => 20,
+            'headers' => [
+                'User-Agent' => self::USER_AGENT,
+            ],
+        ];
+
+        $url = add_query_arg($query, $endpoint);
+        $response = wp_remote_get($url, $args);
+
+        if (is_wp_error($response)) {
+            return ['error' => $response->get_error_message()];
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code >= 400) {
+            return ['error' => sprintf(__('HTTP %d received from explorer', 'mcwt'), (int) $code)];
         }
 
         $body = json_decode(wp_remote_retrieve_body($response), true);
-        if (!isset($body['status']) || (string) $body['status'] !== '1' || empty($body['result'][0])) {
+        if (!is_array($body)) {
+            return ['error' => __('Invalid explorer response.', 'mcwt')];
+        }
+
+        if (isset($body['status']) && (string) $body['status'] === '0') {
+            $result = isset($body['result']) ? $body['result'] : '';
+            if (is_string($result) && false !== stripos($result, 'No transactions')) {
+                return ['no_tx' => true];
+            }
+
+            if (is_string($result) && '' !== trim($result)) {
+                return ['error' => $result];
+            }
+
+            return ['error' => __('Explorer returned an unknown error.', 'mcwt')];
+        }
+
+        $transactions = $this->extract_etherscan_transactions($body);
+        if (empty($transactions)) {
+            return ['no_tx' => true];
+        }
+
+        $tx = $this->normalize_etherscan_transaction($transactions[0], $chain);
+        if (!$tx) {
+            return ['error' => __('Malformed transaction payload.', 'mcwt')];
+        }
+
+        return ['success' => true, 'transaction' => $tx];
+    }
+
+    private function extract_etherscan_transactions($body) {
+        if (isset($body['result']) && is_array($body['result'])) {
+            return $body['result'];
+        }
+        if (isset($body['data']['result']) && is_array($body['data']['result'])) {
+            return $body['data']['result'];
+        }
+        if (isset($body['data']['transactions']) && is_array($body['data']['transactions'])) {
+            return $body['data']['transactions'];
+        }
+        if (isset($body['transactions']) && is_array($body['transactions'])) {
+            return $body['transactions'];
+        }
+
+        return [];
+    }
+
+    private function normalize_etherscan_transaction($tx, $chain) {
+        if (!is_array($tx)) {
             return null;
         }
 
-        $tx = $body['result'][0];
-        $value = isset($tx['value']) ? $this->format_value($tx['value'], $chain) : '0';
-        $explorer_base = ('eth' === $chain) ? 'https://etherscan.io/tx/' : 'https://bscscan.com/tx/';
+        $hash = isset($tx['hash']) ? $tx['hash'] : (isset($tx['tx_hash']) ? $tx['tx_hash'] : '');
+        if (empty($hash)) {
+            return null;
+        }
+
+        $from = isset($tx['from']) ? $tx['from'] : (isset($tx['from_address']) ? $tx['from_address'] : '');
+        $to = isset($tx['to']) ? $tx['to'] : (isset($tx['to_address']) ? $tx['to_address'] : '');
+        $timestamp = isset($tx['timeStamp']) ? (int) $tx['timeStamp'] : (isset($tx['timestamp']) ? (int) $tx['timestamp'] : time());
+        $value = '0';
+
+        if (isset($tx['value'])) {
+            $value = $this->format_value($tx['value'], $chain);
+        } elseif (isset($tx['valueIn'])) {
+            $value = $this->format_value($tx['valueIn'], $chain);
+        } elseif (isset($tx['valueOut'])) {
+            $value = $this->format_value($tx['valueOut'], $chain);
+        } elseif (isset($tx['value_out'])) {
+            $value = $this->format_value($tx['value_out'], $chain);
+        } elseif (isset($tx['valueOutWei'])) {
+            $value = $this->format_value($tx['valueOutWei'], $chain);
+        }
+
+        $explorer_base = ('eth' === $chain)
+            ? 'https://etherscan.io/tx/'
+            : 'https://bscscan.com/tx/';
+
         return [
-            'hash' => $tx['hash'],
-            'from' => $tx['from'],
-            'to' => $tx['to'],
-            'timestamp' => isset($tx['timeStamp']) ? (int) $tx['timeStamp'] : time(),
+            'hash' => $hash,
+            'from' => $from,
+            'to' => $to,
+            'timestamp' => $timestamp,
             'amount' => $value,
-            'explorer' => $explorer_base . $tx['hash'],
+            'explorer' => $explorer_base . $hash,
         ];
     }
 
@@ -721,7 +958,9 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         $args = [
             'timeout' => 20,
-            'headers' => [],
+            'headers' => [
+                'User-Agent' => self::USER_AGENT,
+            ],
         ];
         if (!empty($api_key)) {
             $args['headers']['token'] = $api_key;
@@ -729,15 +968,35 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         $response = wp_remote_get($url, $args);
         if (is_wp_error($response)) {
+            $this->record_api_error('solscan', $response->get_error_message());
+            return null;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code >= 400) {
+            $this->record_api_error('solscan', sprintf(__('HTTP %d received from explorer', 'mcwt'), (int) $code));
             return null;
         }
 
         $body = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($body)) {
+            $this->record_api_error('solscan', __('Invalid explorer response.', 'mcwt'));
+            return null;
+        }
+
+        if (empty($body)) {
+            $this->clear_api_error('solscan');
+            return null;
+        }
+
         if (empty($body[0]['txHash'])) {
+            $this->record_api_error('solscan', __('Malformed transaction payload.', 'mcwt'));
             return null;
         }
 
         $tx = $body[0];
+        $this->clear_api_error('solscan');
+
         return [
             'hash' => $tx['txHash'],
             'timestamp' => isset($tx['blockTime']) ? (int) $tx['blockTime'] : time(),
@@ -748,9 +1007,23 @@ class MCWT_MultiChain_Wallet_Monitor {
 
     private function format_value($value, $chain) {
         if ($chain === 'eth' || $chain === 'bsc') {
+            $raw = is_numeric($value) ? (string) $value : preg_replace('/[^0-9]/', '', (string) $value);
+            if ($raw === '') {
+                return '0';
+            }
+
+            if (function_exists('bcdiv')) {
+                $divided = bcdiv($raw, '1000000000000000000', 6);
+                if (false === $divided) {
+                    $divided = '0';
+                }
+                return number_format_i18n((float) $divided, 6);
+            }
+
             $divisor = pow(10, 18);
-            return number_format_i18n($value / $divisor, 6);
+            return number_format_i18n(((float) $raw) / $divisor, 6);
         }
+
         return (string) $value;
     }
 
@@ -791,13 +1064,86 @@ class MCWT_MultiChain_Wallet_Monitor {
 
         wp_remote_post($keys['discord_webhook'], [
             'timeout' => 15,
-            'headers' => ['Content-Type' => 'application/json'],
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'User-Agent' => self::USER_AGENT,
+            ],
             'body' => wp_json_encode(['content' => $content]),
         ]);
     }
 
     private function wallet_meta_key($address, $chain) {
         return strtolower($chain . ':' . preg_replace('/\s+/', '', $address));
+    }
+
+    private function record_api_error($service, $message) {
+        $message = wp_strip_all_tags($message);
+        if (function_exists('mb_strlen') && mb_strlen($message) > 220) {
+            $message = mb_substr($message, 0, 220) . '…';
+        } elseif (strlen($message) > 220) {
+            $message = substr($message, 0, 220) . '…';
+        }
+
+        $errors = get_option(self::OPTION_ERRORS, []);
+        if (!is_array($errors)) {
+            $errors = [];
+        }
+
+        $errors[$service] = [
+            'message' => $message,
+            'timestamp' => time(),
+        ];
+
+        update_option(self::OPTION_ERRORS, $errors);
+    }
+
+    private function clear_api_error($service) {
+        $errors = get_option(self::OPTION_ERRORS, []);
+        if (!is_array($errors) || empty($errors[$service])) {
+            return;
+        }
+
+        unset($errors[$service]);
+        update_option(self::OPTION_ERRORS, $errors);
+    }
+
+    private function prune_unused_errors($wallets) {
+        $active = [
+            'etherscan' => false,
+            'bscscan' => false,
+            'solscan' => false,
+        ];
+
+        foreach ($wallets as $wallet) {
+            switch ($wallet['chain']) {
+                case 'eth':
+                    $active['etherscan'] = true;
+                    break;
+                case 'bsc':
+                    $active['bscscan'] = true;
+                    break;
+                case 'sol':
+                    $active['solscan'] = true;
+                    break;
+            }
+        }
+
+        $errors = get_option(self::OPTION_ERRORS, []);
+        if (!is_array($errors) || empty($errors)) {
+            return;
+        }
+
+        $changed = false;
+        foreach ($errors as $service => $error) {
+            if (isset($active[$service]) && !$active[$service]) {
+                unset($errors[$service]);
+                $changed = true;
+            }
+        }
+
+        if ($changed) {
+            update_option(self::OPTION_ERRORS, $errors);
+        }
     }
 
     private function acquire_poll_lock() {
