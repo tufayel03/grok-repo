@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: Multi-Chain Wallet Tracker
+ * Plugin Name: Dual-Chain Wallet Tracker
  * Plugin URI: https://example.com
- * Description: Track wallets/contracts on ETH, BSC, SOL for token transactions. Alerts via Discord webhook with token/amount details. Frontend shortcodes: [wallet_tracker] for control, [wallet_latest_tx] for latest transactions, [wallet_logs] for logs. Etherscan V2 + Solscan support.
- * Version: 2.0
+ * Description: Track Ethereum and BNB Smart Chain wallets for token transfers and post Discord alerts. Includes wallet manager and transaction log shortcode.
+ * Version: 2.1
  * Author: Your Name
  * License: GPL v2 or later
  */
@@ -32,8 +32,7 @@ function get_wallet_data() {
     return get_option('wallet_tracker_data', [
         'wallets' => [],
         'config' => ['pollInterval' => 30],
-        'logs' => [],
-        'latestTxs' => []
+        'logs' => []
     ]);
 }
 
@@ -106,9 +105,9 @@ function wallet_tracker_shortcode($atts) {
         
         <div id="config-section" class="config-section">
             <h2>Configuration</h2>
-            <p><strong>Note:</strong> Use a single Etherscan V2 API key for both ETH and BSC (get at <a href="https://etherscan.io/myapikey" target="_blank">Etherscan API Dashboard</a>). For Solana, get free key at <a href="https://solscan.io/dapi" target="_blank">Solscan Developer Portal</a>.</p>
-            <label>Etherscan V2 API Key (for ETH/BSC): <input type="text" id="ethApiKey" placeholder="Your Etherscan V2 API Key"></label><br>
-            <label>Solscan API Key (for SOL): <input type="text" id="solApiKey" placeholder="Your Solscan API Key"></label><br>
+            <p><strong>Note:</strong> Configure individual API keys for each chain. Create keys at <a href="https://etherscan.io/myapikey" target="_blank">Etherscan</a> and <a href="https://bscscan.com/myapikey" target="_blank">BscScan</a>.</p>
+            <label>Etherscan API Key (ETH): <input type="text" id="ethApiKey" placeholder="Your Etherscan API Key"></label><br>
+            <label>BscScan API Key (BSC): <input type="text" id="bscApiKey" placeholder="Your BscScan API Key"></label><br>
             <label>Discord Webhook URL: <input type="text" id="discordWebhook" placeholder="https://discord.com/api/webhooks/..."></label><br>
             <label>Poll Interval (seconds): <input type="number" id="pollInterval" placeholder="30" min="10" max="300"></label><br>
             <button onclick="saveConfig()">Save Config</button>
@@ -121,8 +120,7 @@ function wallet_tracker_shortcode($atts) {
             <div class="add-form">
                 <select id="chain">
                     <option value="eth">Ethereum (ETH)</option>
-                    <option value="bsc">Binance Smart Chain (BSC)</option>
-                    <option value="sol">Solana (SOL)</option>
+                    <option value="bsc">BNB Smart Chain (BSC)</option>
                 </select>
                 <input type="text" id="address" placeholder="Wallet/Contract Address">
                 <input type="text" id="label" placeholder="Custom Label">
@@ -209,19 +207,17 @@ function wallet_tracker_shortcode($atts) {
         const ajaxurl = window.wallet_ajax ? window.wallet_ajax.ajaxurl : '<?php echo esc_js(admin_url('admin-ajax.php')); ?>';
         const wallet_nonce = window.wallet_ajax ? window.wallet_ajax.nonce : '<?php echo esc_js(wp_create_nonce('wallet_tracker_nonce')); ?>';
 
-        // Constants - V2 for ETH/BSC, Solscan for SOL
+        // API endpoints for each chain
         const SCAN_APIS = {
-            eth: 'https://api.etherscan.io/v2/api',
-            bsc: 'https://api.etherscan.io/v2/api',
-            sol: 'https://public-api.solscan.io'
+            eth: 'https://api.etherscan.io/api',
+            bsc: 'https://api.bscscan.com/api'
         };
 
         // Data
-        let data = {wallets: [], config: {pollInterval: 30}, logs: [], latestTxs: {}};
+        let data = {wallets: [], config: {pollInterval: 30}, logs: []};
         let wallets;
         let config;
         let logs;
-        let latestTxs;
         let pollIntervalId;
         let isPolling = localStorage.getItem('isPolling') !== 'false';
         let currentPage = 1;
@@ -244,11 +240,11 @@ function wallet_tracker_shortcode($atts) {
                     return result.data;
                 } else {
                     console.error('Load failed:', result.data);
-                    return {wallets: [], config: {pollInterval:30}, logs:[], latestTxs:{}};
+                    return {wallets: [], config: {pollInterval:30}, logs:[]};
                 }
             } catch (error) {
                 console.error('Load error:', error);
-                return {wallets: [], config: {pollInterval:30}, logs:[], latestTxs:{}};
+                return {wallets: [], config: {pollInterval:30}, logs:[]};
             }
         }
 
@@ -281,7 +277,6 @@ function wallet_tracker_shortcode($atts) {
             wallets = [...(data.wallets || [])];
             config = { ...data.config, pollInterval: data.config.pollInterval || 30 };
             logs = [...(data.logs || [])];
-            latestTxs = { ...data.latestTxs };
             loadConfig();
             renderWallets();
             if (isPolling) startPolling();
@@ -291,8 +286,8 @@ function wallet_tracker_shortcode($atts) {
         function loadConfig() {
             const ethInput = document.getElementById('ethApiKey');
             if (ethInput) ethInput.value = config.ethApiKey || '';
-            const solInput = document.getElementById('solApiKey');
-            if (solInput) solInput.value = config.solApiKey || '';
+            const bscInput = document.getElementById('bscApiKey');
+            if (bscInput) bscInput.value = config.bscApiKey || '';
             const discordInput = document.getElementById('discordWebhook');
             if (discordInput) discordInput.value = config.discordWebhook || '';
             const pollInput = document.getElementById('pollInterval');
@@ -302,8 +297,8 @@ function wallet_tracker_shortcode($atts) {
         async function saveConfig() {
             const ethInput = document.getElementById('ethApiKey');
             if (ethInput) config.ethApiKey = ethInput.value.trim();
-            const solInput = document.getElementById('solApiKey');
-            if (solInput) config.solApiKey = solInput.value.trim();
+            const bscInput = document.getElementById('bscApiKey');
+            if (bscInput) config.bscApiKey = bscInput.value.trim();
             const discordInput = document.getElementById('discordWebhook');
             if (discordInput) config.discordWebhook = discordInput.value.trim();
             const pollInput = document.getElementById('pollInterval');
@@ -339,10 +334,7 @@ function wallet_tracker_shortcode($atts) {
                 return;
             }
 
-            if (chain === 'sol' && address.length !== 44) {
-                showStatus('addStatus', 'Invalid Solana address!', 'error');
-                return;
-            } else if ((chain === 'eth' || chain === 'bsc') && !(/^0x[a-fA-F0-9]{40}$/.test(address))) {
+            if (!(/^0x[a-fA-F0-9]{40}$/.test(address))) {
                 showStatus('addStatus', 'Invalid ETH/BSC address!', 'error');
                 return;
             }
@@ -352,8 +344,7 @@ function wallet_tracker_shortcode($atts) {
                 address: address.toLowerCase(),
                 label,
                 customText: customText || `New {token} transfer on {label}: {amount} tokens.`,
-                lastBlock: 0,
-                lastSignature: null
+                lastBlock: 0
             };
 
             wallets.push(wallet);
@@ -365,9 +356,7 @@ function wallet_tracker_shortcode($atts) {
                 return;
             }
 
-            if (wallet.chain !== 'sol') {
-                await setInitialBlock(wallet);
-            }
+            await setInitialBlock(wallet);
 
             renderWallets();
             addressInput.value = '';
@@ -379,14 +368,12 @@ function wallet_tracker_shortcode($atts) {
         window.addWallet = addWallet;
 
         async function setInitialBlock(wallet) {
-            const apiKey = config.ethApiKey;
+            const apiKey = wallet.chain === 'eth' ? config.ethApiKey : config.bscApiKey;
             if (!apiKey) return;
 
-            const chainId = wallet.chain === 'eth' ? '1' : '56';
             const params = new URLSearchParams({
                 module: 'proxy',
                 action: 'eth_blockNumber',
-                chainid: chainId,
                 apikey: apiKey
             });
 
@@ -394,8 +381,10 @@ function wallet_tracker_shortcode($atts) {
                 const response = await fetch(`${SCAN_APIS[wallet.chain]}?${params}`);
                 const responseData = await response.json();
 
-                if (responseData.status === '1' && responseData.result) {
-                    const currentBlock = parseInt(responseData.result, 16);
+                const raw = responseData.result;
+                if (!raw) return;
+                const currentBlock = typeof raw === 'string' && raw.startsWith('0x') ? parseInt(raw, 16) : parseInt(raw, 10);
+                if (!isNaN(currentBlock)) {
                     wallet.lastBlock = currentBlock - 1;
                     data.wallets = [...wallets];
                     await saveData(data);
@@ -409,10 +398,8 @@ function wallet_tracker_shortcode($atts) {
             const removedWallet = wallets[index];
             wallets.splice(index, 1);
             logs = logs.filter(log => log.walletAddress !== removedWallet.address);
-            delete latestTxs[removedWallet.address];
             data.wallets = [...wallets];
             data.logs = [...logs];
-            data.latestTxs = { ...latestTxs };
             const saveSuccess = await saveData(data);
             if (!saveSuccess) {
                 showGlobalStatus('Remove succeeded locally but backend save failed. Check console.', 'error');
@@ -435,14 +422,18 @@ function wallet_tracker_shortcode($atts) {
 
             const container = document.getElementById('walletContainer');
             if (container) {
-                container.innerHTML = pagedWallets.map((wallet, idx) => {
+                container.innerHTML = pagedWallets.map((wallet) => {
                     const originalIndex = wallets.indexOf(wallet);
-                    const lastTx = latestTxs[wallet.address] ? `Last Tx: ${latestTxs[wallet.address].hash.slice(0,10)}...` : 'No Tx Yet';
+                    const latestLog = logs.find(log => log.walletAddress === wallet.address);
+                    const lastTx = latestLog ? `Last Tx: ${latestLog.txHash.slice(0, 10)}… (${latestLog.token || 'Token'} ${typeof latestLog.amount === 'number' ? latestLog.amount.toFixed(4) : ''})` : 'No activity recorded yet';
                     return `
                         <div class="wallet-item" data-original-index="${originalIndex}">
-                            <span><strong>${wallet.label}</strong> (${wallet.chain.toUpperCase()}: ${wallet.address.slice(0,8)}...)</span>
-                            <span>${lastTx}</span>
-                            <span>${wallet.customText}</span>
+                            <div>
+                                <strong>${wallet.label}</strong>
+                                <div>${wallet.chain.toUpperCase()} • ${wallet.address.slice(0,8)}…${wallet.address.slice(-4)}</div>
+                                <div class="wallet-last-tx">${lastTx}</div>
+                                <div class="wallet-custom">Alert: ${wallet.customText}</div>
+                            </div>
                             <button class="remove-btn" onclick="removeWallet(${originalIndex})">Remove</button>
                         </div>
                     `;
@@ -511,7 +502,7 @@ function wallet_tracker_shortcode($atts) {
             }
         }
 
-        async function sendDiscordAlert(message, walletAddress) {
+        async function sendDiscordAlert(message) {
             if (!config.discordWebhook) {
                 console.warn('No Discord webhook configured');
                 return;
@@ -528,43 +519,46 @@ function wallet_tracker_shortcode($atts) {
             }
         }
 
-        async function logTx(walletAddress, txHash, chain, timestamp = new Date().toISOString()) {
-            const logEntry = { walletAddress, txHash, chain, timestamp };
+        async function logTx(wallet, txDetails, message) {
+            const logEntry = {
+                walletAddress: wallet.address,
+                chain: wallet.chain,
+                timestamp: new Date().toISOString(),
+                txHash: txDetails.hash,
+                token: txDetails.token,
+                amount: txDetails.amount,
+                label: wallet.label,
+                message
+            };
             logs.unshift(logEntry);
-            if (logs.length > 100) logs = logs.slice(0, 100);
-            latestTxs[walletAddress] = { hash: txHash, timestamp };
+            if (logs.length > 250) {
+                logs = logs.slice(0, 250);
+            }
             data.logs = [...logs];
-            data.latestTxs = { ...latestTxs };
             await saveData(data);
         }
 
         async function checkWallet(wallet) {
             try {
-                if (wallet.chain === 'sol') {
-                    await checkSolWallet(wallet);
-                } else {
-                    await checkScanWallet(wallet);
-                }
+                await checkScanWallet(wallet);
             } catch (error) {
                 console.error(`Error checking ${wallet.label}:`, error);
             }
         }
 
         async function checkScanWallet(wallet) {
-            const apiKey = config.ethApiKey;
+            const apiKey = wallet.chain === 'eth' ? config.ethApiKey : config.bscApiKey;
             if (!apiKey) return;
 
-            const chainId = wallet.chain === 'eth' ? '1' : '56';
             const params = new URLSearchParams({
                 module: 'account',
                 action: 'tokentx',
                 address: wallet.address,
-                startblock: wallet.lastBlock + 1,
+                startblock: Math.max(wallet.lastBlock + 1, 0),
                 endblock: 99999999,
                 page: 1,
-                offset: 10,
+                offset: 25,
                 sort: 'desc',
-                chainid: chainId,
                 apikey: apiKey
             });
 
@@ -574,83 +568,48 @@ function wallet_tracker_shortcode($atts) {
             if (responseData.status !== '1') return;
 
             const txs = responseData.result || [];
-            let newTx = false;
+            let hasNew = false;
             let latestBlock = wallet.lastBlock;
             let latestTxDetails = null;
 
             for (const tx of txs) {
-                if (tx.from.toLowerCase() === wallet.address || tx.to.toLowerCase() === wallet.address) {
-                    newTx = true;
-                    latestBlock = Math.max(latestBlock, parseInt(tx.blockNumber));
+                if (!tx.hash) continue;
+                const from = (tx.from || '').toLowerCase();
+                const to = (tx.to || '').toLowerCase();
+                if (from === wallet.address || to === wallet.address) {
+                    hasNew = true;
+                    latestBlock = Math.max(latestBlock, parseInt(tx.blockNumber, 10));
+                    const decimals = parseInt(tx.tokenDecimal || '18', 10);
                     latestTxDetails = {
                         hash: tx.hash,
                         token: tx.tokenSymbol || 'Unknown',
-                        amount: parseFloat(tx.value) / Math.pow(10, parseInt(tx.tokenDecimal || 18))
+                        amount: parseFloat(tx.value || '0') / Math.pow(10, isNaN(decimals) ? 18 : decimals)
                     };
+                    break;
                 }
             }
 
-            if (newTx && latestTxDetails) {
+            if (hasNew && latestTxDetails) {
                 wallet.lastBlock = latestBlock;
                 data.wallets = [...wallets];
                 await saveData(data);
+                const amountNumber = isNaN(latestTxDetails.amount) ? 0 : latestTxDetails.amount;
                 const replacedCustom = wallet.customText
                     .replace('{label}', wallet.label)
                     .replace('{token}', latestTxDetails.token)
-                    .replace('{amount}', latestTxDetails.amount.toFixed(4));
-                const alertMsg = `New transaction detected for ${wallet.label} on ${wallet.chain.toUpperCase()}!\nToken: ${latestTxDetails.token}\nAmount: ${latestTxDetails.amount.toFixed(4)}\n\n${replacedCustom}`;
-                await sendDiscordAlert(alertMsg, wallet.address);
-                await logTx(wallet.address, latestTxDetails.hash, wallet.chain);
-                showGlobalStatus(`Alert: ${wallet.label} detected new ${latestTxDetails.token} transaction!`, 'success');
-            }
-        }
-
-        async function checkSolWallet(wallet) {
-            const apiKey = config.solApiKey;
-            if (!apiKey) return;
-
-            const params = new URLSearchParams({
-                address: wallet.address,
-                offset: 0,
-                limit: 10
-            });
-
-            const response = await fetch(`${SCAN_APIS.sol}/account/tokentxns?${params}`, {
-                headers: { 'Authorization': `Bearer ${apiKey}` }
-            });
-            const responseData = await response.json();
-
-            if (!responseData.data || responseData.data.length === 0) return;
-
-            const txs = responseData.data;
-            let newTx = false;
-            let latestTxDetails = null;
-            let latestSig = wallet.lastSignature;
-
-            for (const tx of txs) {
-                if (!latestSig || tx.signature > latestSig) {
-                    newTx = true;
-                    latestSig = tx.signature;
-                    latestTxDetails = {
-                        hash: tx.signature,
-                        token: tx.mint || 'SOL',
-                        amount: parseFloat(tx.tokenAmount ? tx.tokenAmount.raw : (tx.lamports || 0)) / 1e9
-                    };
-                }
-            }
-
-            if (newTx && latestTxDetails) {
-                wallet.lastSignature = latestSig;
-                data.wallets = [...wallets];
-                await saveData(data);
-                const replacedCustom = wallet.customText
-                    .replace('{label}', wallet.label)
-                    .replace('{token}', latestTxDetails.token)
-                    .replace('{amount}', latestTxDetails.amount.toFixed(4));
-                const alertMsg = `New transaction detected for ${wallet.label} on ${wallet.chain.toUpperCase()}!\nToken: ${latestTxDetails.token}\nAmount: ${latestTxDetails.amount.toFixed(4)}\n\n${replacedCustom}`;
-                await sendDiscordAlert(alertMsg, wallet.address);
-                await logTx(wallet.address, latestTxDetails.hash, wallet.chain);
-                showGlobalStatus(`Alert: ${wallet.label} detected new ${latestTxDetails.token} transaction!`, 'success');
+                    .replace('{amount}', amountNumber.toFixed(4));
+                const explorerBase = wallet.chain === 'eth' ? 'https://etherscan.io' : 'https://bscscan.com';
+                const alertMsg = [
+                    `New transaction detected for **${wallet.label}** on ${wallet.chain.toUpperCase()}.`,
+                    `Token: ${latestTxDetails.token}`,
+                    `Amount: ${amountNumber.toFixed(4)}`,
+                    `Explorer: ${explorerBase}/tx/${latestTxDetails.hash}`,
+                    '',
+                    replacedCustom
+                ].join('\n');
+                await sendDiscordAlert(alertMsg);
+                await logTx(wallet, {...latestTxDetails, amount: amountNumber}, alertMsg);
+                showGlobalStatus(`Alert: ${wallet.label} detected new ${latestTxDetails.token} transfer`, 'success');
             }
         }
 
@@ -703,7 +662,9 @@ function wallet_tracker_shortcode($atts) {
 
         function startPolling() {
             if (pollIntervalId) clearInterval(pollIntervalId);
-            if (wallets.length === 0 || (!config.ethApiKey && wallets.some(w => w.chain !== 'sol')) || (!config.solApiKey && wallets.some(w => w.chain === 'sol'))) {
+            const needsEth = wallets.some(w => w.chain === 'eth');
+            const needsBsc = wallets.some(w => w.chain === 'bsc');
+            if (wallets.length === 0 || (needsEth && !config.ethApiKey) || (needsBsc && !config.bscApiKey)) {
                 console.warn('Cannot start polling: Missing API keys or no wallets');
                 return;
             }
@@ -724,134 +685,6 @@ function wallet_tracker_shortcode($atts) {
 
         // Globals
         window.showStatus = showStatus;
-    </script>
-    <?php
-    return ob_get_clean();
-}
-
-// Shortcode for Latest Transactions Page
-add_shortcode('wallet_latest_tx', 'wallet_latest_tx_shortcode');
-function wallet_latest_tx_shortcode($atts) {
-    wallet_tracker_enqueue_assets();
-    ob_start();
-    ?>
-    <div class="wallet-tracker-container">
-        <h1>Latest Transactions</h1>
-        <div id="latestTxContainer"></div>
-        <button onclick="clearLatestTxs()">Clear All</button>
-    </div>
-
-    <style>
-        body { background-color: #1a1a1a !important; }
-        .wallet-tracker-container { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background-color: #1a1a1a !important; 
-            color: #ffffff; 
-            padding: 20px; 
-            max-width: 1200px; 
-            width: 100%; 
-            margin: 0 auto; 
-            box-sizing: border-box;
-        }
-        .tx-item { background: #2a2a2a; padding: 15px; border-radius: 8px; margin: 10px 0; }
-        button { background: #00ff88; color: #000; padding: 10px; border: none; border-radius: 4px; cursor: pointer; }
-        h1 { color: #00ff88; }
-        a { color: #00ff88; }
-    </style>
-
-    <script>
-        // Use localized vars
-        const ajaxurl = window.wallet_ajax ? window.wallet_ajax.ajaxurl : '<?php echo esc_js(admin_url('admin-ajax.php')); ?>';
-        const wallet_nonce = window.wallet_ajax ? window.wallet_ajax.nonce : '<?php echo esc_js(wp_create_nonce('wallet_tracker_nonce')); ?>';
-
-        let data = {wallets: [], latestTxs: {}};
-        let latestTxs = {};
-        let wallets = [];
-
-        async function loadData() {
-            const formData = new FormData();
-            formData.append('action', 'wallet_tracker_load');
-            formData.append('nonce', wallet_nonce);
-            try {
-                const response = await fetch(ajaxurl, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                if (result.success) {
-                    return result.data;
-                } else {
-                    console.error('Load failed:', result.data);
-                    return {wallets: [], latestTxs: {}};
-                }
-            } catch (error) {
-                console.error('Load error:', error);
-                return {wallets: [], latestTxs: {}};
-            }
-        }
-
-        async function saveData(serverData) {
-            const formData = new FormData();
-            formData.append('action', 'wallet_tracker_save');
-            formData.append('nonce', wallet_nonce);
-            formData.append('data', JSON.stringify(serverData));
-            try {
-                const response = await fetch(ajaxurl, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                return result.success;
-            } catch (error) {
-                console.error('Save error:', error);
-                return false;
-            }
-        }
-
-        function renderLatestTxs() {
-            const container = document.getElementById('latestTxContainer');
-            if (!container) return;
-            const txList = Object.entries(latestTxs).map(([address, tx]) => {
-                const wallet = wallets.find(w => w.address === address);
-                const label = wallet ? wallet.label : address.slice(0,8) + '...';
-                return `
-                    <div class="tx-item">
-                        <strong>${label}</strong> (${tx.timestamp})<br>
-                        Chain: ${wallet ? wallet.chain.toUpperCase() : 'Unknown'}<br>
-                        Tx Hash: <a href="${getTxExplorerUrl(address, tx.hash, wallet ? wallet.chain : 'eth')}" target="_blank">${tx.hash}</a>
-                    </div>
-                `;
-            }).join('');
-            container.innerHTML = txList || '<p>No latest transactions recorded.</p>';
-        }
-
-        function getTxExplorerUrl(address, hash, chain) {
-            switch (chain) {
-                case 'eth': return `https://etherscan.io/tx/${hash}`;
-                case 'bsc': return `https://bscscan.com/tx/${hash}`;
-                case 'sol': return `https://solscan.io/tx/${hash}`;
-                default: return `https://etherscan.io/tx/${hash}`;
-            }
-        }
-
-        async function clearLatestTxs() {
-            data.latestTxs = {};
-            const saveSuccess = await saveData(data);
-            if (saveSuccess) {
-                latestTxs = data.latestTxs;
-                renderLatestTxs();
-            } else {
-                alert('Failed to clear latest TXs on backend.');
-            }
-        }
-
-        document.addEventListener('DOMContentLoaded', async () => {
-            data = await loadData();
-            wallets = [...(data.wallets || [])];
-            latestTxs = { ...data.latestTxs };
-            renderLatestTxs();
-        });
-        window.clearLatestTxs = clearLatestTxs;
     </script>
     <?php
     return ob_get_clean();
@@ -883,6 +716,7 @@ function wallet_logs_shortcode($atts) {
             box-sizing: border-box;
         }
         .log-item { background: #2a2a2a; padding: 10px; border-radius: 4px; margin: 5px 0; border-left: 3px solid #00ff88; }
+        .log-message { margin-top: 8px; color: #bbbbbb; font-size: 0.9em; }
         button { background: #00ff88; color: #000; padding: 10px; margin: 5px; border: none; border-radius: 4px; cursor: pointer; }
         h1 { color: #00ff88; }
         a { color: #00ff88; }
@@ -937,16 +771,31 @@ function wallet_logs_shortcode($atts) {
             }
         }
 
+        function escapeHtml(str) {
+            const safe = (str ?? '').toString();
+            return safe
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function renderLogs() {
             const container = document.getElementById('logsContainer');
             if (!container) return;
             const logList = logs.map(log => {
                 const wallet = wallets.find(w => w.address === log.walletAddress);
-                const label = wallet ? wallet.label : log.walletAddress.slice(0,8) + '...';
+                const label = wallet ? wallet.label : log.label || log.walletAddress.slice(0,8) + '...';
+                const amountText = typeof log.amount === 'number' && !isNaN(log.amount) ? log.amount.toFixed(4) : '—';
+                const messageHtml = log.message ? `<div class="log-message">${escapeHtml(log.message).replace(/\n/g, '<br>')}</div>` : '';
                 return `
                     <div class="log-item">
-                        <strong>${label}</strong> (${log.chain.toUpperCase()}) - ${log.timestamp}<br>
-                        Tx Hash: <a href="${getTxExplorerUrl(log.walletAddress, log.txHash, log.chain)}" target="_blank">${log.txHash}</a>
+                        <div><strong>${escapeHtml(label)}</strong> (${log.chain.toUpperCase()})</div>
+                        <div>Recorded: ${new Date(log.timestamp).toLocaleString()}</div>
+                        <div>Token: ${escapeHtml(log.token || 'Unknown')} • Amount: ${amountText}</div>
+                        <div>Tx Hash: <a href="${getTxExplorerUrl(log.walletAddress, log.txHash, log.chain)}" target="_blank">${log.txHash}</a></div>
+                        ${messageHtml}
                     </div>
                 `;
             }).join('');
@@ -957,7 +806,6 @@ function wallet_logs_shortcode($atts) {
             switch (chain) {
                 case 'eth': return `https://etherscan.io/tx/${hash}`;
                 case 'bsc': return `https://bscscan.com/tx/${hash}`;
-                case 'sol': return `https://solscan.io/tx/${hash}`;
                 default: return `https://etherscan.io/tx/${hash}`;
             }
         }
@@ -1001,7 +849,7 @@ function wallet_logs_shortcode($atts) {
 add_action('wp_enqueue_scripts', 'wallet_tracker_frontend_enqueue');
 function wallet_tracker_frontend_enqueue() {
     global $post;
-    if (is_a($post, 'WP_Post') && (has_shortcode($post->post_content, 'wallet_tracker') || has_shortcode($post->post_content, 'wallet_latest_tx') || has_shortcode($post->post_content, 'wallet_logs'))) {
+    if (is_a($post, 'WP_Post') && (has_shortcode($post->post_content, 'wallet_tracker') || has_shortcode($post->post_content, 'wallet_logs'))) {
         wallet_tracker_enqueue_assets();
     }
 }
